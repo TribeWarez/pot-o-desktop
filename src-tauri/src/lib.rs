@@ -1,0 +1,174 @@
+mod config;
+mod keypair;
+mod mining;
+mod rpc;
+
+use config::PotOConfig;
+use mining::MiningEngine;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::sync::Mutex;
+use tauri::State;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiningStats {
+    pub running: bool,
+    pub challenges: u64,
+    pub proofs_found: u64,
+    pub proofs_submitted: u64,
+    pub proofs_accepted: u64,
+    pub start_time: u64,
+    pub last_challenge_id: String,
+}
+
+impl Default for MiningStats {
+    fn default() -> Self {
+        Self {
+            running: false,
+            challenges: 0,
+            proofs_found: 0,
+            proofs_submitted: 0,
+            proofs_accepted: 0,
+            start_time: 0,
+            last_challenge_id: String::new(),
+        }
+    }
+}
+
+struct AppState {
+    config: Mutex<PotOConfig>,
+    engine: Mutex<MiningEngine>,
+    stats: Mutex<MiningStats>,
+}
+
+#[tauri::command]
+fn get_config(state: State<AppState>) -> PotOConfig {
+    state.config.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn save_config(state: State<AppState>, config: PotOConfig) -> Result<(), String> {
+    config.save()?;
+    *state.config.lock().unwrap() = config;
+    Ok(())
+}
+
+#[tauri::command]
+async fn rpc_get(state: State<'_, AppState>, path: String) -> Result<Value, String> {
+    let base_url = {
+        let cfg = state.config.lock().unwrap();
+        cfg.rpc_url.clone()
+    };
+    let rpc = rpc::PotRpc::new(&base_url);
+    rpc.get(&path).await
+}
+
+#[tauri::command]
+async fn rpc_post(
+    state: State<'_, AppState>,
+    path: String,
+    body: Value,
+) -> Result<Value, String> {
+    let base_url = {
+        let cfg = state.config.lock().unwrap();
+        cfg.rpc_url.clone()
+    };
+    let rpc = rpc::PotRpc::new(&base_url);
+    rpc.post(&path, body).await
+}
+
+#[tauri::command]
+async fn status_api_get(state: State<'_, AppState>, path: String) -> Result<Value, String> {
+    let base_url = {
+        let cfg = state.config.lock().unwrap();
+        cfg.status_url.clone()
+    };
+    let rpc = rpc::PotRpc::new(&base_url);
+    rpc.get(&path).await
+}
+
+#[tauri::command]
+fn mine_pot_o(state: State<AppState>, challenge: Value) -> mining::MiningResult {
+    let config = state.config.lock().unwrap().clone();
+    let engine = state.engine.lock().unwrap();
+    engine.mine_pot_o(challenge, &config)
+}
+
+#[tauri::command]
+fn mine_hexchain(state: State<AppState>, challenge: Value) -> mining::MiningResult {
+    let config = state.config.lock().unwrap().clone();
+    let engine = state.engine.lock().unwrap();
+    engine.mine_hexchain(challenge, &config)
+}
+
+#[tauri::command]
+fn get_mining_stats(state: State<AppState>) -> MiningStats {
+    state.stats.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn set_mining_stats(state: State<AppState>, stats: MiningStats) {
+    *state.stats.lock().unwrap() = stats;
+}
+
+#[tauri::command]
+fn start_mining(state: State<AppState>) {
+    let mut stats = state.stats.lock().unwrap();
+    stats.running = true;
+    stats.start_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+}
+
+#[tauri::command]
+fn generate_keypair(path: String) -> Result<keypair::KeypairInfo, String> {
+    keypair::generate_keypair(&path)
+}
+
+#[tauri::command]
+fn read_keypair(path: String) -> Result<keypair::KeypairInfo, String> {
+    keypair::pubkey_from_file(&path)
+}
+
+#[tauri::command]
+fn is_keypair_file(path: String) -> bool {
+    keypair::is_solana_keypair(&path)
+}
+
+#[tauri::command]
+fn stop_mining(state: State<AppState>) {
+    let mut stats = state.stats.lock().unwrap();
+    stats.running = false;
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let config = PotOConfig::load();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .manage(AppState {
+            config: Mutex::new(config),
+            engine: Mutex::new(MiningEngine::new()),
+            stats: Mutex::new(MiningStats::default()),
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            save_config,
+            rpc_get,
+            rpc_post,
+            status_api_get,
+            mine_pot_o,
+            mine_hexchain,
+            get_mining_stats,
+            set_mining_stats,
+            start_mining,
+            stop_mining,
+            generate_keypair,
+            read_keypair,
+            is_keypair_file,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

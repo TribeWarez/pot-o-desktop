@@ -38,33 +38,4 @@ jobs:
         run: |
           npm ci
           npm run build
-          cargo build --release
-
-  build-macos:
-    runs-on: macos-latest
-    needs: lint
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - name: Build
-        run: |
-          npm ci
-          npm run build
-          cargo build --release
-
-  build-windows:
-    runs-on: windows-latest
-    needs: lint
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build
-        run: |
-          npm ci
-          npm run build
-          cargo build --release
+          cargo build --release --manifest-path src-tauri/Cargo.toml

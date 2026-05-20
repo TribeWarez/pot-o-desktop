@@ -14,8 +14,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: "npm"
-          cache-dependency-path: pot-o-desktop/package-lock.json
       - name: Lint frontend
         run: |
           npm ci
@@ -30,8 +28,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: "npm"
-          cache-dependency-path: pot-o-desktop/package-lock.json
       - name: Install system deps
         run: |
           sudo apt-get update -qq
@@ -54,8 +50,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: "npm"
-          cache-dependency-path: pot-o-desktop/package-lock.json
       - name: Build
         run: |
           npm ci
@@ -71,8 +65,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: "npm"
-          cache-dependency-path: pot-o-desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: |

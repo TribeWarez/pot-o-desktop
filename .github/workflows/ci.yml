@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main, master]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -27,6 +30,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install system deps
         run: |
           sudo apt-get update -qq
@@ -39,3 +43,90 @@ jobs:
           npm ci
           npm run build
           cargo build --release --manifest-path src-tauri/Cargo.toml
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pot-o-desktop-linux
+          path: src-tauri/target/release/pot-o-desktop
+
+  build-macos:
+    runs-on: macos-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: |
+          npm ci
+          npm run build
+          cargo build --release --manifest-path src-tauri/Cargo.toml
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pot-o-desktop-macos
+          path: src-tauri/target/release/pot-o-desktop
+
+  build-windows:
+    runs-on: windows-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: |
+          npm ci
+          npm run build
+          cargo build --release --manifest-path src-tauri/Cargo.toml
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pot-o-desktop-windows
+          path: src-tauri/target/release/pot-o-desktop.exe
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-macos, build-windows]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pot-o-desktop-*
+          merge-multiple: true
+      - name: Compute tag
+        id: tag
+        run: |
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          TAG="v0.1.0+$(date +%Y%m%d)-${SHORT_SHA}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Pot-O Desktop ${{ steps.tag.outputs.tag }}"
+          body: |
+            Automated build from main branch.
+
+            ## Downloads
+            - **Linux** — `pot-o-desktop` (binary)
+            - **macOS** — `pot-o-desktop` (binary)
+            - **Windows** — `pot-o-desktop.exe`
+
+            Run `npx tauri build` locally for platform installers (.deb/.AppImage/.dmg/.msi).
+          files: |
+            pot-o-desktop
+            pot-o-desktop.exe
+          draft: false
+          prerelease: false
+          generate_release_notes: false

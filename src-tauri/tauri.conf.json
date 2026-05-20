@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Pot-O Desktop",
         "width": 1024,
         "height": 768,

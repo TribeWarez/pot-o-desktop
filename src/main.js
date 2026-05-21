@@ -5,31 +5,124 @@ let config = {};
 let dashboardData = {};
 let dashboardTimer = null;
 let miningTimer = null;
+let lastMiningErrorToast = 0;
 
-// ── Navigation ───────────────────────────────────────────
+const TOAST_MS = 4000;
+const MINING_ERROR_DEBOUNCE_MS = 10000;
 
-document.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-tab]");
-  if (!btn) return;
-  document.querySelectorAll("[data-tab]").forEach(b => b.classList.remove("active"));
-  btn.classList.add("active");
+// ── Toasts ───────────────────────────────────────────────
+
+function initToasts() {
+  if (document.getElementById("toast-container")) return;
+  const container = document.createElement("div");
+  container.id = "toast-container";
+  container.className = "toast-container";
+  document.body.appendChild(container);
+}
+
+function showToast(message, type = "info") {
+  initToasts();
+  const container = document.getElementById("toast-container");
+  const toast = document.createElement("div");
+  const cls = type === "success" || type === "ok" ? "toast-success"
+    : type === "error" || type === "err" ? "toast-error"
+    : "toast-info";
+  toast.className = `toast ${cls}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), TOAST_MS);
+}
+
+function showMiningError(message) {
+  const now = Date.now();
+  if (now - lastMiningErrorToast < MINING_ERROR_DEBOUNCE_MS) return;
+  lastMiningErrorToast = now;
+  showToast(message, "error");
+}
+
+function formatError(e) {
+  return String(e?.message ?? e);
+}
+
+// ── Navigation & actions (event delegation) ────────────
+
+function switchTab(tab) {
+  document.querySelectorAll("[data-tab]").forEach(b => {
+    b.classList.toggle("active", b.dataset.tab === tab);
+  });
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-  document.getElementById("tab_" + btn.dataset.tab).classList.add("active");
-  if (btn.dataset.tab === "dashboard") startDashboard();
+  const panel = document.getElementById("tab_" + tab);
+  if (panel) panel.classList.add("active");
+  if (tab === "dashboard") startDashboard();
   else stopDashboard();
+}
+
+document.addEventListener("click", async (e) => {
+  const tabBtn = e.target.closest("[data-tab]");
+  if (tabBtn) {
+    switchTab(tabBtn.dataset.tab);
+    return;
+  }
+
+  const actionBtn = e.target.closest("[data-action]");
+  if (!actionBtn) return;
+
+  const action = actionBtn.dataset.action;
+  try {
+    switch (action) {
+      case "save-config":
+        await saveConfig();
+        break;
+      case "test-connection":
+        await testConnection();
+        break;
+      case "load-keypair":
+        await loadKeypair();
+        break;
+      case "generate-keypair":
+        await generateKeypair();
+        break;
+      case "clear-keypair": {
+        const pathEl = document.getElementById("kp_path");
+        if (pathEl) pathEl.value = "";
+        const infoEl = document.getElementById("kp_info");
+        if (infoEl) infoEl.innerHTML = "";
+        const pubEl = document.getElementById("kp_pubkey_display");
+        if (pubEl) pubEl.value = "";
+        break;
+      }
+      case "set-pubkey":
+        await setPubkeyFromKeypair();
+        break;
+      case "start-mining":
+        await doStartMining();
+        break;
+      case "stop-mining":
+        await doStopMining();
+        break;
+      default:
+        break;
+    }
+  } catch (err) {
+    showToast(formatError(err), "error");
+  }
 });
 
 // ── Settings ─────────────────────────────────────────────
 
 async function loadConfig() {
-  config = await invoke("get_config");
-  renderSettings();
+  try {
+    config = await invoke("get_config");
+    renderSettings();
+  } catch (e) {
+    showToast(`Failed to load config: ${formatError(e)}`, "error");
+  }
 }
 
 async function saveConfig() {
   gatherFormValues();
   await invoke("save_config", { config });
-  showStatus("Settings saved", "ok");
+  showToast("Settings saved", "success");
 }
 
 function gatherFormValues() {
@@ -50,24 +143,16 @@ function gatherFormValues() {
   config.verbose = document.getElementById("verbose").checked;
 }
 
-function showStatus(msg, type) {
-  const el = document.getElementById("status_msg");
-  el.textContent = msg;
-  el.className = "status " + type;
-  setTimeout(() => { el.textContent = ""; el.className = "status"; }, 3000);
-}
-
-function testConnection() {
+async function testConnection() {
   gatherFormValues();
-  invoke("rpc_get", { path: "/health" })
-    .then((resp) => {
-      const svc = resp.service || "unknown";
-      const ver = resp.version || "?";
-      showStatus(`RPC OK: ${svc} v${ver}`, "ok");
-    })
-    .catch((e) => {
-      showStatus(`RPC error: ${e}`, "err");
-    });
+  try {
+    const resp = await invoke("rpc_get", { path: "/health" });
+    const svc = resp.service || "unknown";
+    const ver = resp.version || "?";
+    showToast(`RPC OK: ${svc} v${ver}`, "success");
+  } catch (e) {
+    showToast(`RPC error: ${formatError(e)}`, "error");
+  }
 }
 
 function renderSettings() {
@@ -82,19 +167,18 @@ function renderSettings() {
           <button data-tab="keypair">Keys</button>
         </nav>
       </header>
-      <div id="status_msg" class="status"></div>
 
       <div id="tab_keypair" class="tab">
         <section>
           <h2>Keypair Manager</h2>
           <div class="row">
             <label>Keypair File <input id="kp_path" value="${esc(config.miner_json_path || '')}" placeholder="~/pot-o-miner-cli/mineri.json" /></label>
-            <button style="margin-top:18px" onclick="loadKeypair()">Load</button>
+            <button type="button" style="margin-top:18px" data-action="load-keypair">Load</button>
           </div>
           <div id="kp_info"></div>
           <div class="actions">
-            <button class="primary" onclick="generateKeypair()">Generate New Keypair</button>
-            <button onclick="document.getElementById('kp_path').value=''; loadKeypair();">Clear</button>
+            <button type="button" class="primary" data-action="generate-keypair">Generate New Keypair</button>
+            <button type="button" data-action="clear-keypair">Clear</button>
           </div>
         </section>
         <section>
@@ -102,7 +186,7 @@ function renderSettings() {
           <p style="font-size:0.82rem;color:#999;margin-bottom:8px">Set this keypair's pubkey as your miner identity in Settings.</p>
           <div class="row">
             <label>Miner Pubkey <input id="kp_pubkey_display" readonly placeholder="Load a keypair to see pubkey" /></label>
-            <button style="margin-top:18px" onclick="setPubkeyFromKeypair()">Use as Identity</button>
+            <button type="button" style="margin-top:18px" data-action="set-pubkey">Use as Identity</button>
           </div>
         </section>
       </div>
@@ -113,7 +197,7 @@ function renderSettings() {
           <label>RPC URL <input id="rpc_url" value="${esc(config.rpc_url)}" /></label>
           <label>Status URL <input id="status_url" value="${esc(config.status_url)}" /></label>
           <label>Solana RPC URL <input id="solana_rpc_url" value="${esc(config.solana_rpc_url)}" placeholder="Optional" /></label>
-          <button onclick="testConnection()">Test Connection</button>
+          <button type="button" data-action="test-connection">Test Connection</button>
         </section>
         <section>
           <h2>Identity</h2>
@@ -167,25 +251,13 @@ function renderSettings() {
           <label class="checkbox"><input id="verbose" type="checkbox" ${config.verbose ? "checked" : ""} /> Verbose</label>
         </section>
         <div class="actions">
-          <button class="primary" onclick="saveConfig()">Save Settings</button>
+          <button type="button" class="primary" data-action="save-config">Save Settings</button>
         </div>
       </div>
 
       <div id="tab_dashboard" class="tab active"></div>
     </div>
   `;
-  // Re-bind tab clicks (they were lost on innerHTML replace)
-  document.querySelectorAll("[data-tab]").forEach(b => {
-    b.addEventListener("click", (e) => {
-      document.querySelectorAll("[data-tab]").forEach(x => x.classList.remove("active"));
-      b.classList.add("active");
-      document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-      document.getElementById("tab_" + b.dataset.tab).classList.add("active");
-      if (b.dataset.tab === "dashboard") startDashboard();
-      else stopDashboard();
-    });
-  });
-  // Start dashboard by default
   startDashboard();
 }
 
@@ -201,7 +273,7 @@ function startDashboard() {
 
 function stopDashboard() {
   if (dashboardTimer) { clearInterval(dashboardTimer); dashboardTimer = null; }
-  if (miningTimer) { clearInterval(miningTimer); miningTimer = null; }
+  if (miningTimer) { clearTimeout(miningTimer); miningTimer = null; }
 }
 
 async function refreshDashboard() {
@@ -256,19 +328,17 @@ function renderDashboard() {
   const running = stats.running || false;
 
   let html = `<div class="container">`;
-  // Header + mining controls
   html += `
     <header>
       <h1>Dashboard</h1>
       <div class="mining-controls">
         <span class="mining-status ${running ? 'running' : ''}">${running ? '● Mining' : '○ Idle'}</span>
-        <button class="${running ? 'btn-stop' : 'btn-start'}" onclick="${running ? 'doStopMining()' : 'doStartMining()'}">
+        <button type="button" class="${running ? 'btn-stop' : 'btn-start'}" data-action="${running ? 'stop-mining' : 'start-mining'}">
           ${running ? 'Stop' : 'Start'} Mining
         </button>
       </div>
     </header>`;
 
-  // Stats bar
   html += `<div class="stats-bar">
     <div class="stat"><span class="num">${stats.challenges || 0}</span> Challenges</div>
     <div class="stat"><span class="num">${stats.proofs_found || 0}</span> Found</div>
@@ -277,7 +347,6 @@ function renderDashboard() {
     <div class="stat"><span class="num">${stats.start_time ? fmtDuration(Math.floor(Date.now()/1000) - stats.start_time) : '—'}</span> Uptime</div>
   </div>`;
 
-  // Gateway services
   html += `<section><h2>Gateway Services</h2>`;
   const gs = d.gateway || {};
   if (gs._error) {
@@ -298,7 +367,6 @@ function renderDashboard() {
   }
   html += `</section>`;
 
-  // PoT-O Live
   html += `<section><h2>PoT-O Validator</h2>`;
   const live = d.apiLive;
   if (!live || live._error) {
@@ -321,12 +389,10 @@ function renderDashboard() {
     html += `<div><strong>Network Nodes:</strong> ${net.total_nodes ?? '—'}</div>
       <div><strong>Synced:</strong> ${net.synced ?? '—'}</div>`;
     html += `</div>`;
-    // current challenge
     const ch = pot.current_challenge || {};
     if (ch.id) {
       html += `<div class="challenge-line"><strong>Current Challenge:</strong> id=${esc(String(ch.id).slice(0,24))} slot=${ch.slot ?? '?'}</div>`;
     }
-    // miners by device
     const mbd = pot.miners_by_device || (d.apiLive && d.apiLive.miners_by_device);
     if (mbd && typeof mbd === 'object') {
       html += `<div class="miners-line"><strong>Miners by device:</strong> `;
@@ -339,7 +405,6 @@ function renderDashboard() {
   }
   html += `</section>`;
 
-  // Hexchain (if enabled)
   if (config.hexchain_mode) {
     html += `<section><h2>Hexchain Lattice</h2>`;
     const hs = d.hexStatus || {};
@@ -367,7 +432,6 @@ function renderDashboard() {
     html += `</section>`;
   }
 
-  // Pool
   html += `<section><h2>Pool</h2>`;
   const pool = d.pool || {};
   if (pool._error) {
@@ -382,7 +446,6 @@ function renderDashboard() {
   }
   html += `</section>`;
 
-  // Miner info
   if (config.miner_pubkey) {
     html += `<section><h2>Miner (${esc(config.miner_pubkey.slice(0,20))}...)</h2>`;
     const min = d.miner;
@@ -396,7 +459,6 @@ function renderDashboard() {
     html += `</section>`;
   }
 
-  // Peers
   html += `<section><h2>Network Peers</h2>`;
   const peers = d.peers;
   if (!peers || peers._error) {
@@ -424,13 +486,15 @@ function renderDashboard() {
 
 async function doStartMining() {
   await invoke("start_mining");
+  showToast("Mining started", "success");
   renderDashboard();
   runMiningLoop();
 }
 
 async function doStopMining() {
   await invoke("stop_mining");
-  if (miningTimer) { clearInterval(miningTimer); miningTimer = null; }
+  if (miningTimer) { clearTimeout(miningTimer); miningTimer = null; }
+  showToast("Mining stopped", "success");
   renderDashboard();
 }
 
@@ -438,7 +502,6 @@ async function runMiningLoop() {
   const stats = await invoke("get_mining_stats");
   if (!stats.running) return;
 
-  // Fetch challenge
   try {
     const challenge = await invoke("rpc_post", {
       path: "/challenge",
@@ -450,7 +513,6 @@ async function runMiningLoop() {
       stats.last_challenge_id = challenge.id || "";
       await invoke("set_mining_stats", { stats });
 
-      // Run mining engine
       const result = config.hexchain_mode
         ? await invoke("mine_hexchain", { challenge })
         : await invoke("mine_pot_o", { challenge });
@@ -459,7 +521,6 @@ async function runMiningLoop() {
         stats.proofs_found++;
         await invoke("set_mining_stats", { stats });
 
-        // Submit proof
         try {
           const submitResp = await invoke("rpc_post", {
             path: "/submit",
@@ -468,18 +529,20 @@ async function runMiningLoop() {
           stats.proofs_submitted++;
           if (submitResp && submitResp.accepted) {
             stats.proofs_accepted++;
+            showToast("Proof accepted", "success");
+          } else {
+            showToast("Proof submitted (not accepted)", "info");
           }
           await invoke("set_mining_stats", { stats });
         } catch (e) {
-          console.error("Submit failed:", e);
+          showMiningError(`Submit failed: ${formatError(e)}`);
         }
       }
     }
   } catch (e) {
-    console.error("Mining cycle error:", e);
+    showMiningError(`Mining cycle: ${formatError(e)}`);
   }
 
-  // Schedule next cycle
   const delay = (config.loop_delay || 2) * 1000;
   miningTimer = setTimeout(runMiningLoop, delay);
   renderDashboard();
@@ -505,24 +568,25 @@ async function generateKeypair() {
   const defaultPath = config.miner_json_path || osDefaultKeypath();
   const path = prompt("Save keypair to:", defaultPath);
   if (!path) return;
-  try {
-    const info = await invoke("generate_keypair", { path });
-    document.getElementById("kp_path").value = path;
-    renderKeypairInfo(info);
-    showStatus(`Keypair generated: ${info.pubkey.slice(0,16)}...`, "ok");
-  } catch (e) {
-    showStatus(`Generation failed: ${e}`, "err");
-  }
+  const info = await invoke("generate_keypair", { path });
+  document.getElementById("kp_path").value = path;
+  renderKeypairInfo(info);
+  showToast(`Keypair generated: ${info.pubkey.slice(0, 16)}...`, "success");
 }
 
 async function loadKeypair() {
   const path = document.getElementById("kp_path").value;
-  if (!path) { document.getElementById("kp_info").innerHTML = ""; return; }
+  if (!path) {
+    document.getElementById("kp_info").innerHTML = "";
+    return;
+  }
   try {
     const info = await invoke("read_keypair", { path });
     renderKeypairInfo(info);
+    showToast("Keypair loaded", "success");
   } catch (e) {
-    document.getElementById("kp_info").innerHTML = `<p class="err">${esc(e)}</p>`;
+    document.getElementById("kp_info").innerHTML = `<p class="err">${esc(formatError(e))}</p>`;
+    showToast(`Load failed: ${formatError(e)}`, "error");
   }
 }
 
@@ -541,7 +605,6 @@ function renderKeypairInfo(info) {
     </div>
   `;
   document.getElementById("kp_pubkey_display").value = info.pubkey;
-  // Check if 64-byte keypair (never send as signature)
   if (isKp) {
     invoke("is_keypair_file", { path: info.path }).then(isKpFile => {
       if (isKpFile) {
@@ -553,10 +616,14 @@ function renderKeypairInfo(info) {
 
 async function setPubkeyFromKeypair() {
   const pubkey = document.getElementById("kp_pubkey_display").value;
-  if (!pubkey) { showStatus("No pubkey loaded", "err"); return; }
-  document.getElementById("miner_pubkey").value = pubkey;
-  document.querySelector('[data-tab="settings"]').click();
-  showStatus("Pubkey set — save settings to persist", "ok");
+  if (!pubkey) {
+    showToast("No pubkey loaded", "error");
+    return;
+  }
+  const minerEl = document.getElementById("miner_pubkey");
+  if (minerEl) minerEl.value = pubkey;
+  switchTab("settings");
+  showToast("Pubkey set — save settings to persist", "success");
 }
 
 function osDefaultKeypath() {
@@ -566,4 +633,7 @@ function osDefaultKeypath() {
 
 // ── Init ─────────────────────────────────────────────────
 
-document.addEventListener("DOMContentLoaded", loadConfig);
+document.addEventListener("DOMContentLoaded", () => {
+  initToasts();
+  loadConfig();
+});

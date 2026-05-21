@@ -12,12 +12,13 @@ npm run dev          # Vite frontend dev server on :1420
 npm run build        # Vite build → dist/
 npm run tauri        # npx tauri proxy (e.g. `npm run tauri build`)
 
-cargo build --release --manifest-path src-tauri/Cargo.toml
+npm run tauri build -- --no-bundle   # production binary (embeds dist/); use for local runs & CI
 cargo clippy --manifest-path src-tauri/Cargo.toml   # required before PR
 cargo tauri dev      # full Tauri dev with hot-reload
 npx tauri build      # platform bundles (.deb/.AppImage/.dmg/.msi)
 
-# CI runs: npm ci → npm run build → cargo build --release
+# Plain `cargo build --release` is NOT a shippable desktop build (WebView stays on :1420).
+# CI runs: npm ci → npm run tauri build -- --no-bundle
 ```
 
 ## Architecture

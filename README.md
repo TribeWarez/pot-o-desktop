@@ -30,15 +30,14 @@ A cross-platform GUI wallet and miner for the TribeWarez ecosystem. Built with [
 # Install dependencies
 npm install
 
-# Frontend
-npm run build
+# Production binary (frontend embedded; no installer)
+npm run tauri build -- --no-bundle
 
-# Backend
-cargo build --release
-
-# Full Tauri bundle
+# Full platform installer bundle (.deb/.AppImage/.dmg/.msi)
 npx tauri build
 ```
+
+Plain `cargo build --release` does not embed the frontend; use `tauri build` for runnable apps.
 
 ## Usage
 
@@ -46,7 +45,7 @@ npx tauri build
 # Development mode (hot-reload)
 cargo tauri dev
 
-# Run the built binary
+# Run the production binary (after `tauri build --no-bundle`)
 ./src-tauri/target/release/pot-o-desktop
 ```
 

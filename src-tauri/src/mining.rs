@@ -5,6 +5,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
+use hexchain_p2p::block::HexBlock;
+use hexchain_p2p::lattice_geometry::HCPCoord;
+use hexchain_p2p::types::{BlockHash, TensorMeta, NEIGHBOR_SLOTS, NEIGHBOR_SLOT_EMPTY};
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MiningResult {
     pub status: String,
@@ -34,7 +38,7 @@ impl MiningEngine {
         } else {
             c["mml_threshold"].as_f64().unwrap_or(0.85)
         };
-        let path_distance_max = c["path_distance_max"].as_i64().unwrap_or(8) as u64;
+        let path_distance_max = c["path_distance_max"].as_i64().unwrap_or(8) as u32;
         let max_dim = config.max_tensor_dim;
         let tensor_dim = c["max_tensor_dim"].as_i64().unwrap_or(64).min(max_dim as i64) as u64;
 
@@ -110,16 +114,16 @@ impl MiningEngine {
         let tensor_hash = compute_tensor_hash(&output_data, &[out_rows, out_cols]);
 
         let max_iter = config.max_iterations as usize;
-        let mut best_dist = usize::MAX;
+        let mut best_dist = u32::MAX;
 
         for nonce in 0..max_iter {
-            let actual = compute_actual_path(&output_data, nonce, &layer_widths);
+            let actual = compute_actual_path(&output_data, nonce as u64, &layer_widths);
             let dist = hamming_distance(&exp_path, &actual);
             if dist < best_dist {
                 best_dist = dist;
             }
 
-            if dist as u64 <= path_distance_max {
+            if dist <= path_distance_max {
                 let path_sig = path_to_hex(&actual);
                 let comp_hash = compute_proof_hash(
                     &challenge_id,
@@ -163,77 +167,63 @@ impl MiningEngine {
     ) -> MiningResult {
         let c = challenge;
         let challenge_id = c["id"].as_str().unwrap_or("").to_string();
-        let target_bytes = c["target"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_i64().map(|x| x as u8))
-                    .collect::<Vec<u8>>()
-            })
-            .unwrap_or_default();
 
-        let coord = (
-            c["coord"]["q"].as_i64().unwrap_or(0) as i32,
-            c["coord"]["r"].as_i64().unwrap_or(0) as i32,
-            c["coord"]["s"].as_i64().unwrap_or(0) as i32,
-        );
+        let coord = HCPCoord {
+            q: c["coord"]["q"].as_i64().unwrap_or(0) as i32,
+            r: c["coord"]["r"].as_i64().unwrap_or(0) as i32,
+            s: c["coord"]["s"].as_i64().unwrap_or(0) as i32,
+        };
 
-        let nb_hashes: Vec<Vec<u8>> = c["neighbor_hashes"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|h| {
-                        if let Some(list) = h.as_array() {
-                            list.iter()
-                                .filter_map(|v| v.as_i64().map(|x| x as u8))
-                                .collect()
-                        } else if let Some(s) = h.as_str() {
-                            hex::decode(s).unwrap_or_default()
-                        } else {
-                            vec![0u8; 32]
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let target_hex = c["target"].as_str().unwrap_or("");
+        let target_bytes = hex::decode(target_hex).unwrap_or_default();
+        let target: BlockHash = {
+            let mut arr = [0u8; 32];
+            let len = target_bytes.len().min(32);
+            arr[..len].copy_from_slice(&target_bytes[..len]);
+            arr
+        };
 
-        let nb_merkle = merkle_root_neighbors(&nb_hashes);
-
-        let parent_hash = nb_hashes.first().cloned().unwrap_or(vec![0u8; 32]);
         let created_at = c["created_at_unix"].as_i64().unwrap_or(0) as u64;
+
+        let nb_arr = c["neighbor_hashes"].as_array().cloned().unwrap_or_default();
+        let mut neighbor_hashes = [NEIGHBOR_SLOT_EMPTY; NEIGHBOR_SLOTS];
+        for (i, val) in nb_arr.iter().enumerate() {
+            if i >= NEIGHBOR_SLOTS {
+                break;
+            }
+            let bytes = if let Some(s) = val.as_str() {
+                hex::decode(s).unwrap_or_default()
+            } else if let Some(arr) = val.as_array() {
+                arr.iter().filter_map(|v| v.as_i64().map(|x| x as u8)).collect()
+            } else {
+                vec![0u8; 32]
+            };
+            let mut slot = [0u8; 32];
+            let len = bytes.len().min(32);
+            slot[..len].copy_from_slice(&bytes[..len]);
+            neighbor_hashes[i] = slot;
+        }
 
         let max_iter = config.max_iterations as usize;
 
-        let pre_prefix = {
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&parent_hash);
-            buf.extend_from_slice(&[0u8; 32]); // tx_merkle_root placeholder
-            buf.extend_from_slice(&created_at.to_le_bytes());
-            // nonce bytes (8 bytes) go here at offset 72
-            buf
-        }; // length = 72 bytes
-
-        let pre_suffix = {
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&coord.0.to_le_bytes());
-            buf.extend_from_slice(&coord.1.to_le_bytes());
-            buf.extend_from_slice(&coord.2.to_le_bytes());
-            buf.extend_from_slice(&nb_merkle);
-            buf.extend_from_slice(&1000u64.to_le_bytes()); // expected_capacity
-            buf.extend_from_slice(&1000u64.to_le_bytes()); // actual_capacity
-            buf.extend_from_slice(&95u64.to_le_bytes()); // compression_num
-            buf.extend_from_slice(&100u64.to_le_bytes()); // compression_den
-            buf
-        };
-
         for nonce in 0..max_iter {
-            let mut preimage = Vec::new();
-            preimage.extend_from_slice(&pre_prefix);
-            preimage.extend_from_slice(&(nonce as u64).to_le_bytes());
-            preimage.extend_from_slice(&pre_suffix);
+            let block = HexBlock {
+                parent_hash: neighbor_hashes[0],
+                tx_merkle_root: [0u8; 32],
+                timestamp: created_at,
+                nonce: nonce as u64,
+                coord,
+                neighbor_hashes,
+                tensor: TensorMeta {
+                    expected_capacity: 1000,
+                    actual_capacity: 1000,
+                    compression_num: 95,
+                    compression_den: 100,
+                },
+            };
 
-            let hash = sha256_once(&preimage);
-            if hash.as_slice() <= target_bytes.as_slice() {
+            let hv = block.pow_hash();
+            if hv <= target {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -242,17 +232,17 @@ impl MiningEngine {
                 let proof = serde_json::json!({
                     "challenge_id": challenge_id,
                     "block": {
-                        "parent_hash": parent_hash.iter().map(|&b| b as i64).collect::<Vec<_>>(),
-                        "tx_merkle_root": vec![0i64; 32],
-                        "timestamp": created_at,
-                        "nonce": nonce,
-                        "coord": {"q": coord.0, "r": coord.1, "s": coord.2},
-                        "neighbor_hashes": nb_hashes.iter().map(|h| h.iter().map(|&b| b as i64).collect::<Vec<_>>()).collect::<Vec<_>>(),
+                        "parent_hash": block.parent_hash.iter().map(|&b| b as i64).collect::<Vec<_>>(),
+                        "tx_merkle_root": block.tx_merkle_root.iter().map(|&b| b as i64).collect::<Vec<_>>(),
+                        "timestamp": block.timestamp,
+                        "nonce": block.nonce,
+                        "coord": {"q": block.coord.q, "r": block.coord.r, "s": block.coord.s},
+                        "neighbor_hashes": block.neighbor_hashes.iter().map(|h| h.iter().map(|&b| b as i64).collect::<Vec<_>>()).collect::<Vec<_>>(),
                         "tensor": {
-                            "expected_capacity": 1000u64,
-                            "actual_capacity": 1000u64,
-                            "compression_num": 95u64,
-                            "compression_den": 100u64,
+                            "expected_capacity": block.tensor.expected_capacity,
+                            "actual_capacity": block.tensor.actual_capacity,
+                            "compression_num": block.tensor.compression_num,
+                            "compression_den": block.tensor.compression_den,
                         },
                     },
                     "miner_pubkey": config.miner_pubkey,
@@ -389,7 +379,7 @@ fn compute_mml_score(input: &[f64], output: &[f64]) -> f64 {
     out_comp as f64 / in_comp as f64
 }
 
-// ── Neural path ────────────────────────────────────────────────────────────
+// ── Neural path (XOR nonce bits — matching pot-o-validator v0.7.3) ────────
 
 fn expected_path_signature(challenge_id_hex: &str, layer_widths: &[usize]) -> Vec<u8> {
     let hash_bytes = hex::decode(challenge_id_hex).unwrap_or(vec![0u8; 32]);
@@ -408,35 +398,38 @@ fn expected_path_signature(challenge_id_hex: &str, layer_widths: &[usize]) -> Ve
 
 fn compute_actual_path(
     output_floats: &[f64],
-    nonce: usize,
+    nonce: u64,
     layer_widths: &[usize],
 ) -> Vec<u8> {
     let mut activations: Vec<f64> = output_floats.to_vec();
-    for i in 0..activations.len() {
-        let nc = ((nonce + i) as f64 * 1e-6).sin() * 0.1;
-        activations[i] += nc;
-    }
     let mut path_bits = Vec::new();
-    let mut current = activations;
+    let mut bit_idx: u32 = 0;
+
     for &width in layer_widths {
-        let stride = (current.len() / width).max(1);
+        let stride = (activations.len() / width).max(1);
         let mut layer_out = Vec::with_capacity(width);
         for j in 0..width {
             let start = j * stride;
-            let end = (start + stride).min(current.len());
-            let s: f64 = current[start..end].iter().sum();
+            let end = (start + stride).min(activations.len());
+            let s: f64 = activations[start..end].iter().sum();
             let val = s.max(0.0);
             layer_out.push(val);
-            path_bits.push(if val > 0.0 { 1 } else { 0 });
+
+            let base_bit = if val > 0.0 { 1u8 } else { 0u8 };
+            let shift = (bit_idx as u64) % 64;
+            let nonce_bit = ((nonce >> shift) & 1) as u8;
+            let bit = base_bit ^ nonce_bit;
+            path_bits.push(bit);
+            bit_idx = bit_idx.wrapping_add(1);
         }
-        current = layer_out;
+        activations = layer_out;
     }
     path_bits
 }
 
-fn hamming_distance(a: &[u8], b: &[u8]) -> usize {
+fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
     let min_len = a.len().min(b.len());
-    (0..min_len).filter(|&i| a[i] != b[i]).count()
+    (0..min_len).filter(|&i| a[i] != b[i]).count() as u32
 }
 
 fn path_to_hex(path: &[u8]) -> String {
@@ -478,38 +471,4 @@ fn compute_proof_hash(
     hasher.update(path_sig.as_bytes());
     hasher.update(&nonce.to_le_bytes());
     hex::encode(hasher.finalize())
-}
-
-// ── Hexchain helpers ──────────────────────────────────────────────────────
-
-fn sha256_once(data: &[u8]) -> Vec<u8> {
-    Sha256::digest(data).to_vec()
-}
-
-fn sha256_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(a);
-    hasher.update(b);
-    hasher.finalize().to_vec()
-}
-
-fn sha256_double_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
-    let inner = sha256_pair(a, b);
-    sha256_once(&inner)
-}
-
-fn merkle_root_neighbors(leaves: &[Vec<u8>]) -> Vec<u8> {
-    let mut level: Vec<Vec<u8>> = leaves.to_vec();
-    while level.len() > 1 {
-        let mut next = Vec::new();
-        for i in (0..level.len()).step_by(2) {
-            if i + 1 < level.len() {
-                next.push(sha256_double_pair(&level[i], &level[i + 1]));
-            } else {
-                next.push(sha256_double_pair(&level[i], &level[i]));
-            }
-        }
-        level = next;
-    }
-    level.into_iter().next().unwrap_or_else(|| vec![0u8; 32])
 }

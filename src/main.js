@@ -6,6 +6,8 @@ let dashboardData = {};
 let dashboardTimer = null;
 let miningTimer = null;
 let lastMiningErrorToast = 0;
+let wsChallengeHandler = null;
+let wsConnected = false;
 
 const TOAST_MS = 4000;
 const MINING_ERROR_DEBOUNCE_MS = 10000;
@@ -100,6 +102,15 @@ document.addEventListener("click", async (e) => {
       case "stop-mining":
         await doStopMining();
         break;
+      case "ws-connect":
+        await doWsConnect();
+        break;
+      case "ws-disconnect":
+        await doWsDisconnect();
+        break;
+      case "register-device":
+        await doRegisterDevice();
+        break;
       default:
         break;
     }
@@ -113,6 +124,7 @@ document.addEventListener("click", async (e) => {
 async function loadConfig() {
   try {
     config = await invoke("get_config");
+    wsConnected = await invoke("ws_is_connected");
     renderSettings();
   } catch (e) {
     showToast(`Failed to load config: ${formatError(e)}`, "error");
@@ -139,6 +151,13 @@ function gatherFormValues() {
   config.device_type = document.getElementById("device_type").value;
   config.device_id = document.getElementById("device_id").value;
   config.hexchain_mode = document.getElementById("hexchain_mode").checked;
+  config.peer_network_mode = document.getElementById("peer_network_mode").value;
+  config.pool_strategy = document.getElementById("pool_strategy").value;
+  config.bootstrap_urls = document.getElementById("bootstrap_urls").value.split("\n").map(s => s.trim()).filter(Boolean);
+  config.enable_mdns = document.getElementById("enable_mdns").checked;
+  config.mdns_service_name = document.getElementById("mdns_service_name").value;
+  config.peer_timeout_secs = parseInt(document.getElementById("peer_timeout_secs").value) || 30;
+  config.challenge_relay_enabled = document.getElementById("challenge_relay_enabled").checked;
   config.explain = document.getElementById("explain").checked;
   config.verbose = document.getElementById("verbose").checked;
 }
@@ -172,7 +191,7 @@ function renderSettings() {
         <section>
           <h2>Keypair Manager</h2>
           <div class="row">
-            <label>Keypair File <input id="kp_path" value="${esc(config.miner_json_path || '')}" placeholder="~/pot-o-miner-cli/mineri.json" /></label>
+            <label>Keypair File <input id="kp_path" value="${esc(config.miner_json_path || '')}" placeholder="~/pot-o-miner-cli/miner.json" /></label>
             <button type="button" style="margin-top:18px" data-action="load-keypair">Load</button>
           </div>
           <div id="kp_info"></div>
@@ -238,12 +257,46 @@ function renderSettings() {
                 <option value="native" ${seld("native")}>Native</option>
               </select>
             </label>
-            <label>Device ID <input id="device_id" value="${esc(config.device_id)}" placeholder="(Optional)" /></label>
+            <label>Device ID <input id="device_id" value="${esc(config.device_id)}" placeholder="(Auto-generated if empty)" /></label>
           </div>
+        </section>
+        <section>
+          <h2>P2P / Network</h2>
+          <div class="row">
+            <label>Network Mode
+              <select id="peer_network_mode">
+                <option value="local_only" ${selmode("local_only")}>Local Only</option>
+                <option value="vpn_mesh" ${selmode("vpn_mesh")}>VPN Mesh</option>
+              </select>
+            </label>
+            <label>Pool Strategy
+              <select id="pool_strategy">
+                <option value="solo" ${selpool("solo")}>Solo</option>
+                <option value="proportional" ${selpool("proportional")}>Proportional</option>
+                <option value="pplns" ${selpool("pplns")}>PPLNS</option>
+              </select>
+            </label>
+          </div>
+          <label>Peer Timeout (s) <input id="peer_timeout_secs" type="number" value="${config.peer_timeout_secs}" /></label>
+          <label>Bootstrap URLs (one per line)
+            <textarea id="bootstrap_urls" rows="3" placeholder="http://bootstrap1.local:8765">${esc((config.bootstrap_urls || []).join("\n"))}</textarea>
+          </label>
+          <label>mDNS Service Name <input id="mdns_service_name" value="${esc(config.mdns_service_name)}" placeholder="pot-o-desktop" /></label>
+          <label class="checkbox"><input id="enable_mdns" type="checkbox" ${config.enable_mdns ? "checked" : ""} /> Enable mDNS Discovery</label>
+          <label class="checkbox"><input id="challenge_relay_enabled" type="checkbox" ${config.challenge_relay_enabled ? "checked" : ""} /> Challenge Relay Enabled</label>
         </section>
         <section>
           <h2>Mode</h2>
           <label class="checkbox"><input id="hexchain_mode" type="checkbox" ${config.hexchain_mode ? "checked" : ""} /> Hexchain Lattice PoW Mode</label>
+        </section>
+        <section>
+          <h2>WebSocket</h2>
+          <p style="font-size:0.82rem;color:#999;margin-bottom:8px">Connect to validator WebSocket for push challenges and real-time updates.</p>
+          <div class="actions">
+            <button type="button" data-action="ws-connect" id="ws-connect-btn" ${wsConnected ? 'disabled' : ''}>Connect WS</button>
+            <button type="button" data-action="ws-disconnect" id="ws-disconnect-btn" ${!wsConnected ? 'disabled' : ''}>Disconnect WS</button>
+            <span id="ws-status" style="font-size:0.82rem;color:${wsConnected ? '#00d4aa' : '#666'};margin-left:8px">${wsConnected ? '● Connected' : '○ Disconnected'}</span>
+          </div>
         </section>
         <section>
           <h2>Debug</h2>
@@ -252,6 +305,7 @@ function renderSettings() {
         </section>
         <div class="actions">
           <button type="button" class="primary" data-action="save-config">Save Settings</button>
+          <button type="button" data-action="register-device">Register Device</button>
         </div>
       </div>
 
@@ -259,6 +313,56 @@ function renderSettings() {
     </div>
   `;
   startDashboard();
+}
+
+// ── WebSocket ────────────────────────────────────────────
+
+async function doWsConnect() {
+  try {
+    const deviceId = await invoke("ws_connect");
+    wsConnected = true;
+    showToast(`WS connected (device: ${deviceId.slice(0, 8)}...)`, "success");
+    const connectBtn = document.getElementById("ws-connect-btn");
+    const disconnectBtn = document.getElementById("ws-disconnect-btn");
+    const statusEl = document.getElementById("ws-status");
+    if (connectBtn) connectBtn.disabled = true;
+    if (disconnectBtn) disconnectBtn.disabled = false;
+    if (statusEl) { statusEl.textContent = "● Connected"; statusEl.style.color = "#00d4aa"; }
+  } catch (e) {
+    showToast(`WS connect failed: ${formatError(e)}`, "error");
+  }
+}
+
+async function doWsDisconnect() {
+  try {
+    await invoke("ws_disconnect");
+    wsConnected = false;
+    showToast("WS disconnected", "info");
+    const connectBtn = document.getElementById("ws-connect-btn");
+    const disconnectBtn = document.getElementById("ws-disconnect-btn");
+    const statusEl = document.getElementById("ws-status");
+    if (connectBtn) connectBtn.disabled = false;
+    if (disconnectBtn) disconnectBtn.disabled = true;
+    if (statusEl) { statusEl.textContent = "○ Disconnected"; statusEl.style.color = "#666"; }
+  } catch (e) {
+    showToast(`WS disconnect failed: ${formatError(e)}`, "error");
+  }
+}
+
+// ── Device Registration ─────────────────────────────────
+
+async function doRegisterDevice() {
+  gatherFormValues();
+  try {
+    const resp = await invoke("register_device", {
+      deviceType: config.device_type || "native",
+      deviceId: config.device_id || null,
+      minerPubkey: config.miner_pubkey || null,
+    });
+    showToast(`Device registered: ${resp.device_id || "ok"}`, "success");
+  } catch (e) {
+    showToast(`Register failed: ${formatError(e)}`, "error");
+  }
 }
 
 // ── Dashboard ────────────────────────────────────────────
@@ -281,7 +385,7 @@ async function refreshDashboard() {
   try {
     const [gateway, apiLive, pool, peers, devices, miner, stats] = await Promise.all([
       safeFetch("/status", false),
-      safeFetch("/api/live", false),
+      safeFetch("/api/live", true),
       safeFetch("/pool", true),
       safeFetch("/network/peers", true),
       safeFetch("/devices", true),
@@ -391,7 +495,7 @@ function renderDashboard() {
     html += `</div>`;
     const ch = pot.current_challenge || {};
     if (ch.id) {
-      html += `<div class="challenge-line"><strong>Current Challenge:</strong> id=${esc(String(ch.id).slice(0,24))} slot=${ch.slot ?? '?'}</div>`;
+      html += `<div class="challenge-line"><strong>Current Challenge:</strong> id=${esc(String(ch.id).slice(0,24))} slot=${ch.slot ?? '?'} diff=${ch.difficulty ?? '?'}</div>`;
     }
     const mbd = pot.miners_by_device || (d.apiLive && d.apiLive.miners_by_device);
     if (mbd && typeof mbd === 'object') {
@@ -403,6 +507,11 @@ function renderDashboard() {
       html += `</div>`;
     }
   }
+  html += `</section>`;
+
+  // WebSocket status in dashboard
+  html += `<section><h2>WebSocket</h2>`;
+  html += `<p style="font-size:0.82rem;color:${wsConnected ? '#00d4aa' : '#666'}">${wsConnected ? '● Connected — receiving push challenges' : '○ Not connected'}</p>`;
   html += `</section>`;
 
   if (config.hexchain_mode) {
@@ -469,7 +578,7 @@ function renderDashboard() {
       html += `<ul class="peer-list">`;
       for (const p of list.slice(0, 10)) {
         const s = typeof p === 'string' ? p : JSON.stringify(p);
-        html += `<li>${esc(s.slice(0,60))}</li>`;
+        html += `<li>${esc(s.slice(0,80))}</li>`;
       }
       html += `</ul>`;
     } else {
@@ -503,10 +612,20 @@ async function runMiningLoop() {
   if (!stats.running) return;
 
   try {
-    const challenge = await invoke("rpc_post", {
-      path: "/challenge",
-      body: { device_type: config.device_type || "cpu" },
-    });
+    let challenge;
+
+    // If WS connected, try to use push challenge (set by wsChallengeHandler)
+    if (wsChallengeHandler) {
+      challenge = await wsChallengeHandler();
+    }
+
+    // Fallback to HTTP pull
+    if (!challenge || !challenge.id) {
+      challenge = await invoke("rpc_post", {
+        path: "/challenge",
+        body: { device_type: config.device_type || "native" },
+      });
+    }
 
     if (challenge && challenge.id) {
       stats.challenges++;
@@ -524,7 +643,11 @@ async function runMiningLoop() {
         try {
           const submitResp = await invoke("rpc_post", {
             path: "/submit",
-            body: { proof: result.proof },
+            body: {
+              proof: result.proof,
+              device_id: config.device_id || null,
+              device_type: config.device_type || "native",
+            },
           });
           stats.proofs_submitted++;
           if (submitResp && submitResp.accepted) {
@@ -555,6 +678,8 @@ function esc(s) {
 }
 function sel(v) { return config.operation === v ? "selected" : ""; }
 function seld(v) { return config.device_type === v ? "selected" : ""; }
+function selmode(v) { return config.peer_network_mode === v ? "selected" : ""; }
+function selpool(v) { return config.pool_strategy === v ? "selected" : ""; }
 function fmtDuration(s) {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
@@ -608,7 +733,7 @@ function renderKeypairInfo(info) {
   if (isKp) {
     invoke("is_keypair_file", { path: info.path }).then(isKpFile => {
       if (isKpFile) {
-        el.innerHTML += `<p class="warn">⚠️ 64-byte Solana keypair — never use as proof signature</p>`;
+        el.innerHTML += `<p class="warn">⚠ 64-byte Solana keypair — never use as proof signature</p>`;
       }
     });
   }

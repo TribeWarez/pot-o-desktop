@@ -28,6 +28,15 @@ pub struct PotOConfig {
     // Mode
     pub hexchain_mode: bool,
 
+    // P2P / Network
+    pub peer_network_mode: String,
+    pub pool_strategy: String,
+    pub bootstrap_urls: Vec<String>,
+    pub enable_mdns: bool,
+    pub mdns_service_name: String,
+    pub peer_timeout_secs: u64,
+    pub challenge_relay_enabled: bool,
+
     // Debug
     pub explain: bool,
     pub verbose: bool,
@@ -51,6 +60,13 @@ impl Default for PotOConfig {
             device_type: "cpu".into(),
             device_id: String::new(),
             hexchain_mode: false,
+            peer_network_mode: "local_only".into(),
+            pool_strategy: "solo".into(),
+            bootstrap_urls: vec![],
+            enable_mdns: false,
+            mdns_service_name: "pot-o-desktop".into(),
+            peer_timeout_secs: 30,
+            challenge_relay_enabled: false,
             explain: false,
             verbose: false,
         }

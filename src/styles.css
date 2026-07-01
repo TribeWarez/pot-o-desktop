@@ -42,6 +42,12 @@ input, select {
 }
 input:focus, select:focus { outline: none; border-color: #00d4aa; }
 input[type="checkbox"] { width: auto; display: inline; margin-right: 6px; }
+textarea {
+  display: block; width: 100%; margin-top: 3px; padding: 7px 10px;
+  background: #0f3460; border: 1px solid #333; border-radius: 5px;
+  color: #e0e0e0; font-size: 0.85rem; font-family: monospace; resize: vertical;
+}
+textarea:focus { outline: none; border-color: #00d4aa; }
 label.checkbox { display: flex; align-items: center; cursor: pointer; }
 
 .row { display: flex; gap: 12px; }

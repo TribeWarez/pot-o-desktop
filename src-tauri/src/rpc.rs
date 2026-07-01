@@ -14,6 +14,7 @@ impl PotRpc {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_base_url(&mut self, url: &str) {
         self.base_url = url.trim_end_matches('/').to_string();
     }
@@ -45,5 +46,44 @@ impl PotRpc {
         resp.json()
             .await
             .map_err(|e| format!("JSON parse failed: {}", e))
+    }
+
+    /// Submit proof with device info matching the validator's v0.7.3 submit format.
+    #[allow(dead_code)]
+    pub async fn submit_proof(
+        &self,
+        proof: Value,
+        device_id: Option<String>,
+        device_type: Option<String>,
+    ) -> Result<Value, String> {
+        let mut body = serde_json::json!({
+            "proof": proof,
+        });
+        if let Some(did) = device_id {
+            body["device_id"] = Value::String(did);
+        }
+        if let Some(dt) = device_type {
+            body["device_type"] = Value::String(dt);
+        }
+        self.post("/submit", body).await
+    }
+
+    /// Register a device with the validator.
+    pub async fn register_device(
+        &self,
+        device_type: &str,
+        device_id: Option<String>,
+        miner_pubkey: Option<String>,
+    ) -> Result<Value, String> {
+        let mut body = serde_json::json!({
+            "device_type": device_type,
+        });
+        if let Some(did) = device_id {
+            body["device_id"] = Value::String(did);
+        }
+        if let Some(pk) = miner_pubkey {
+            body["miner_pubkey"] = Value::String(pk);
+        }
+        self.post("/devices/register", body).await
     }
 }

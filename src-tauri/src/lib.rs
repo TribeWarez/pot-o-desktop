@@ -2,11 +2,13 @@ mod config;
 mod keypair;
 mod mining;
 mod rpc;
+mod ws_client;
 
 use config::PotOConfig;
 use mining::MiningEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::State;
 
@@ -39,6 +41,7 @@ struct AppState {
     config: Mutex<PotOConfig>,
     engine: Mutex<MiningEngine>,
     stats: Mutex<MiningStats>,
+    ws_connected: AtomicBool,
 }
 
 #[tauri::command]
@@ -122,6 +125,12 @@ fn start_mining(state: State<AppState>) {
 }
 
 #[tauri::command]
+fn stop_mining(state: State<AppState>) {
+    let mut stats = state.stats.lock().unwrap();
+    stats.running = false;
+}
+
+#[tauri::command]
 fn generate_keypair(path: String) -> Result<keypair::KeypairInfo, String> {
     keypair::generate_keypair(&path)
 }
@@ -137,9 +146,49 @@ fn is_keypair_file(path: String) -> bool {
 }
 
 #[tauri::command]
-fn stop_mining(state: State<AppState>) {
-    let mut stats = state.stats.lock().unwrap();
-    stats.running = false;
+async fn register_device(
+    state: State<'_, AppState>,
+    device_type: String,
+    device_id: Option<String>,
+    miner_pubkey: Option<String>,
+) -> Result<Value, String> {
+    let base_url = {
+        let cfg = state.config.lock().unwrap();
+        cfg.rpc_url.clone()
+    };
+    let rpc = rpc::PotRpc::new(&base_url);
+    rpc.register_device(&device_type, device_id, miner_pubkey).await
+}
+
+#[tauri::command]
+async fn ws_connect(state: State<'_, AppState>) -> Result<String, String> {
+    let (base_url, device_id) = {
+        let cfg = state.config.lock().unwrap();
+        (cfg.rpc_url.clone(), cfg.device_id.clone())
+    };
+    let did = if device_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        device_id
+    };
+
+    let client = ws_client::WsClient::new(&did, &base_url);
+    let _rx = client.connect().await?;
+
+    state.ws_connected.store(true, Ordering::SeqCst);
+
+    Ok(did)
+}
+
+#[tauri::command]
+async fn ws_disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    state.ws_connected.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn ws_is_connected(state: State<AppState>) -> bool {
+    state.ws_connected.load(Ordering::SeqCst)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -152,6 +201,7 @@ pub fn run() {
             config: Mutex::new(config),
             engine: Mutex::new(MiningEngine::new()),
             stats: Mutex::new(MiningStats::default()),
+            ws_connected: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -168,6 +218,10 @@ pub fn run() {
             generate_keypair,
             read_keypair,
             is_keypair_file,
+            register_device,
+            ws_connect,
+            ws_disconnect,
+            ws_is_connected,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

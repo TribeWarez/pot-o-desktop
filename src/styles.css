@@ -117,6 +117,14 @@ th { color: #00d4aa; font-weight: 600; }
 
 .json { background: #0f3460; padding: 8px; border-radius: 4px; font-size: 0.75rem; overflow-x: auto; }
 
+#tab_wallet table td { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.log-viewer {
+  background: #0a0a14; border: 1px solid #333; border-radius: 4px; padding: 12px;
+  font-family: monospace; font-size: 0.75rem; line-height: 1.5; color: #aaa;
+  max-height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break-all;
+}
+
 .err { color: #ff6b6b; }
 .dim { color: #666; font-style: italic; }
 .mono { font-family: monospace; }

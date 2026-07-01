@@ -37,6 +37,10 @@ pub struct PotOConfig {
     pub peer_timeout_secs: u64,
     pub challenge_relay_enabled: bool,
 
+    // Wallet
+    pub wallet_base_url: String,
+    pub wallet_address: String,
+
     // Debug
     pub explain: bool,
     pub verbose: bool,
@@ -48,7 +52,7 @@ impl Default for PotOConfig {
             rpc_url: "https://pot.rpc.gateway.tribewarez.com".into(),
             status_url: "https://status.rpc.gateway.tribewarez.com".into(),
             solana_rpc_url: String::new(),
-            miner_pubkey: String::new(),
+            miner_pubkey: "CKY9IV99Y_fu_Oh5CEMO6G7ovWqnLZZNYPob8CQFMZ4".into(),
             miner_json_path: String::new(),
             submit_signature: String::new(),
             max_iterations: 10000,
@@ -67,6 +71,8 @@ impl Default for PotOConfig {
             mdns_service_name: "pot-o-desktop".into(),
             peer_timeout_secs: 30,
             challenge_relay_enabled: false,
+            wallet_base_url: "https://wallet.rpc.gateway.tribewarez.com".into(),
+            wallet_address: "CKY9IV99Y_fu_Oh5CEMO6G7ovWqnLZZNYPob8CQFMZ4".into(),
             explain: false,
             verbose: false,
         }
@@ -87,7 +93,11 @@ impl PotOConfig {
     pub fn load() -> Self {
         let path = Self::config_path();
         if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(config) = toml::from_str(&content) {
+            if let Ok(mut config) = toml::from_str::<Self>(&content) {
+                // migrate known outdated URLs
+                if config.rpc_url == "https://wallet.rpc.gateway.tribewarez.com/wallet" {
+                    config.rpc_url = "https://pot.rpc.gateway.tribewarez.com".into();
+                }
                 return config;
             }
         }

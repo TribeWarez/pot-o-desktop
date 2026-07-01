@@ -1,7 +1,9 @@
 mod config;
 mod keypair;
+mod logger;
 mod mining;
 mod rpc;
+mod wallet;
 mod ws_client;
 
 use config::PotOConfig;
@@ -42,6 +44,8 @@ struct AppState {
     engine: Mutex<MiningEngine>,
     stats: Mutex<MiningStats>,
     ws_connected: AtomicBool,
+    wallet: Mutex<Option<wallet::WalletClient>>,
+    wallet_logged_in: AtomicBool,
 }
 
 #[tauri::command]
@@ -191,6 +195,54 @@ fn ws_is_connected(state: State<AppState>) -> bool {
     state.ws_connected.load(Ordering::SeqCst)
 }
 
+#[tauri::command]
+async fn wallet_list_accounts(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let base_url = {
+        let cfg = state.config.lock().unwrap();
+        cfg.wallet_base_url.clone()
+    };
+    let client = wallet::WalletClient::new(&base_url);
+    client.list_accounts().await
+}
+
+#[tauri::command]
+async fn wallet_login(
+    state: State<'_, AppState>,
+    address: String,
+    password: String,
+) -> Result<(), String> {
+    let base_url = {
+        let cfg = state.config.lock().unwrap();
+        cfg.wallet_base_url.clone()
+    };
+    let client = wallet::WalletClient::new(&base_url);
+    client.login(&address, &password).await?;
+    *state.wallet.lock().unwrap() = Some(client);
+    state.wallet_logged_in.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn wallet_is_logged_in(state: State<AppState>) -> bool {
+    state.wallet_logged_in.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+fn wallet_logout(state: State<AppState>) {
+    *state.wallet.lock().unwrap() = None;
+    state.wallet_logged_in.store(false, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn read_log(max_lines: Option<usize>) -> Result<String, String> {
+    logger::read_log(max_lines.unwrap_or(100))
+}
+
+#[tauri::command]
+fn clear_log() -> Result<(), String> {
+    logger::clear_log()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let config = PotOConfig::load();
@@ -202,6 +254,8 @@ pub fn run() {
             engine: Mutex::new(MiningEngine::new()),
             stats: Mutex::new(MiningStats::default()),
             ws_connected: AtomicBool::new(false),
+            wallet: Mutex::new(None),
+            wallet_logged_in: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -222,6 +276,12 @@ pub fn run() {
             ws_connect,
             ws_disconnect,
             ws_is_connected,
+            wallet_list_accounts,
+            wallet_login,
+            wallet_is_logged_in,
+            wallet_logout,
+            read_log,
+            clear_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

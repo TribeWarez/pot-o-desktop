@@ -8,6 +8,10 @@ let miningTimer = null;
 let lastMiningErrorToast = 0;
 let wsChallengeHandler = null;
 let wsConnected = false;
+let walletData = {};
+let walletTimer = null;
+let walletLoggedIn = false;
+let walletAccounts = [];
 
 const TOAST_MS = 4000;
 const MINING_ERROR_DEBOUNCE_MS = 10000;
@@ -55,8 +59,10 @@ function switchTab(tab) {
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   const panel = document.getElementById("tab_" + tab);
   if (panel) panel.classList.add("active");
-  if (tab === "dashboard") startDashboard();
-  else stopDashboard();
+  if (tab === "dashboard") { startDashboard(); stopWallet(); }
+  else if (tab === "wallet") { startWallet(); stopDashboard(); }
+  else if (tab === "logs") { renderLogsTab(); stopDashboard(); stopWallet(); }
+  else { stopDashboard(); stopWallet(); }
 }
 
 document.addEventListener("click", async (e) => {
@@ -111,6 +117,30 @@ document.addEventListener("click", async (e) => {
       case "register-device":
         await doRegisterDevice();
         break;
+      case "wallet-refresh":
+        await refreshWallet();
+        break;
+      case "wallet-transfer":
+        await doWalletTransfer();
+        break;
+      case "wallet-set-address":
+        await setWalletAddress();
+        break;
+      case "wallet-gateway-login":
+        await doWalletGatewayLogin();
+        break;
+      case "wallet-gateway-logout":
+        await doWalletGatewayLogout();
+        break;
+      case "wallet-gateway-list":
+        await doWalletGatewayList();
+        break;
+      case "refresh-logs":
+        await refreshLogs();
+        break;
+      case "clear-logs":
+        await clearLogs();
+        break;
       default:
         break;
     }
@@ -140,6 +170,7 @@ async function saveConfig() {
 function gatherFormValues() {
   config.rpc_url = document.getElementById("rpc_url").value;
   config.status_url = document.getElementById("status_url").value;
+  config.wallet_base_url = document.getElementById("wallet_base_url").value;
   config.solana_rpc_url = document.getElementById("solana_rpc_url").value;
   config.miner_pubkey = document.getElementById("miner_pubkey").value;
   config.max_iterations = parseInt(document.getElementById("max_iterations").value) || 10000;
@@ -183,7 +214,9 @@ function renderSettings() {
         <nav>
           <button data-tab="settings">Settings</button>
           <button class="active" data-tab="dashboard">Dashboard</button>
+          <button data-tab="wallet">Wallet</button>
           <button data-tab="keypair">Keys</button>
+          <button data-tab="logs">Logs</button>
         </nav>
       </header>
 
@@ -215,6 +248,7 @@ function renderSettings() {
           <h2>Connection</h2>
           <label>RPC URL <input id="rpc_url" value="${esc(config.rpc_url)}" /></label>
           <label>Status URL <input id="status_url" value="${esc(config.status_url)}" /></label>
+          <label>Wallet Gateway URL <input id="wallet_base_url" value="${esc(config.wallet_base_url)}" placeholder="https://wallet.rpc.gateway.tribewarez.com" /></label>
           <label>Solana RPC URL <input id="solana_rpc_url" value="${esc(config.solana_rpc_url)}" placeholder="Optional" /></label>
           <button type="button" data-action="test-connection">Test Connection</button>
         </section>
@@ -310,6 +344,10 @@ function renderSettings() {
       </div>
 
       <div id="tab_dashboard" class="tab active"></div>
+
+      <div id="tab_wallet" class="tab"></div>
+
+      <div id="tab_logs" class="tab"></div>
     </div>
   `;
   startDashboard();
@@ -365,6 +403,225 @@ async function doRegisterDevice() {
   }
 }
 
+// ── Wallet ──────────────────────────────────────────────
+
+const TOKEN_TYPES = ["tribechain", "pttc", "nmtc", "stomp", "aum", "ai3"];
+
+function startWallet() {
+  renderWallet();
+  if (!walletTimer) walletTimer = setInterval(refreshWallet, 15000);
+  refreshWallet();
+}
+
+function stopWallet() {
+  if (walletTimer) { clearInterval(walletTimer); walletTimer = null; }
+}
+
+async function refreshWallet() {
+  const addr = (config.wallet_address || config.miner_pubkey || "").trim();
+  if (!addr) {
+    walletData = { error: "No wallet address configured" };
+    renderWallet();
+    return;
+  }
+  const results = {};
+  results.address = addr;
+  const balances = {};
+  await Promise.all(TOKEN_TYPES.map(async (tok) => {
+    try {
+      const r = await invoke("rpc_get", { path: `/token/balance/${addr}/${tok}` });
+      balances[tok] = r.balance;
+    } catch { balances[tok] = null; }
+  }));
+  results.balances = balances;
+  try {
+    const txData = await invoke("rpc_get", { path: `/token/tx/${addr}` });
+    results.transactions = txData.transactions || [];
+  } catch { results.transactions = []; }
+  try {
+    const tribe = await invoke("rpc_get", { path: "/token/tribe/address" });
+    results.tribeAddress = tribe.address || "—";
+  } catch { results.tribeAddress = null; }
+  try {
+    const supply = await invoke("rpc_get", { path: "/token/tribe/supply" });
+    results.tribeSupply = supply.supply;
+    results.tribeMinted = supply.total_minted;
+  } catch { results.tribeSupply = null; }
+  walletData = results;
+  renderWallet();
+}
+
+async function doWalletTransfer() {
+  const from = document.getElementById("wf_from").value || config.miner_pubkey;
+  const to = document.getElementById("wf_to").value;
+  const token = document.getElementById("wf_token").value;
+  const amount = parseInt(document.getElementById("wf_amount").value);
+  const fee = parseInt(document.getElementById("wf_fee").value) || 0;
+  if (!to || !amount) { showToast("Recipient and amount required", "error"); return; }
+  try {
+    const r = await invoke("rpc_post", {
+      path: "/token/transfer",
+      body: { from, to, token_type: token, amount, fee },
+    });
+    showToast(`Transfer sent: ${r.tx_hash || "ok"}`, "success");
+    refreshWallet();
+  } catch (e) {
+    showToast(`Transfer failed: ${formatError(e)}`, "error");
+  }
+}
+
+async function setWalletAddress() {
+  const addr = document.getElementById("wallet_address").value.trim();
+  if (!addr) { showToast("Enter a wallet address", "error"); return; }
+  config.wallet_address = addr;
+  document.getElementById("miner_pubkey").value = addr;
+  showToast("Wallet address set", "success");
+  refreshWallet();
+}
+
+async function doWalletGatewayLogin() {
+  const addr = document.getElementById("wg_address").value.trim();
+  const pass = document.getElementById("wg_password").value;
+  if (!addr || !pass) { showToast("Address and password required", "error"); return; }
+  try {
+    await invoke("wallet_login", { address: addr, password: pass });
+    walletLoggedIn = true;
+    showToast("Wallet gateway logged in", "success");
+    renderWallet();
+  } catch (e) {
+    showToast(`Login failed: ${formatError(e)}`, "error");
+  }
+}
+
+async function doWalletGatewayLogout() {
+  await invoke("wallet_logout");
+  walletLoggedIn = false;
+  showToast("Logged out", "info");
+  renderWallet();
+}
+
+async function doWalletGatewayList() {
+  try {
+    const accounts = await invoke("wallet_list_accounts");
+    walletAccounts = accounts;
+    showToast(`Found ${accounts.length} accounts`, "success");
+    renderWallet();
+  } catch (e) {
+    showToast(`List failed: ${formatError(e)}`, "error");
+  }
+}
+
+function renderWallet() {
+  const el = document.getElementById("tab_wallet");
+  if (!el) return;
+  const d = walletData || {};
+  const addr = config.wallet_address || config.miner_pubkey || "";
+  let html = `<div class="container">
+    <header><h1>Wallet</h1></header>`;
+
+  // Wallet address
+  html += `<section><h2>Account</h2>
+    <div class="row">
+      <label>Wallet Address <input id="wallet_address" value="${esc(addr)}" placeholder="Enter wallet address" /></label>
+      <button type="button" style="margin-top:18px" data-action="wallet-set-address">Set</button>
+    </div>`;
+  if (!addr) {
+    html += `<p class="dim">No wallet address set. Enter your pubkey above or load a keypair from the Keys tab.</p>`;
+  }
+  html += `</section>`;
+
+  // Balances
+  html += `<section><h2>Balances</h2>`;
+  if (d.error) {
+    html += `<p class="err">${esc(d.error)}</p>`;
+  } else if (d.balances) {
+    html += `<table><tr><th>Token</th><th>Balance</th></tr>`;
+    for (const tok of TOKEN_TYPES) {
+      const bal = d.balances[tok];
+      html += `<tr><td>${tok.toUpperCase()}</td><td>${bal != null ? bal : '—'}</td></tr>`;
+    }
+    html += `</table>`;
+  } else {
+    html += `<p class="dim">Loading...</p>`;
+  }
+  html += `</section>`;
+
+  // TRIBE info
+  if (d.tribeAddress) {
+    html += `<section><h2>TRIBE Token</h2>
+      <div class="grid-2">
+        <div><strong>Mint:</strong> ${esc(d.tribeAddress)}</div>
+        <div><strong>Supply:</strong> ${d.tribeSupply ?? '—'}</div>
+        <div><strong>Minted:</strong> ${d.tribeMinted ?? '—'}</div>
+      </div></section>`;
+  }
+
+  // Transfer
+  html += `<section><h2>Transfer</h2>
+    <div class="row">
+      <label>From <input id="wf_from" value="${esc(addr)}" /></label>
+      <label>To <input id="wf_to" placeholder="Recipient address" /></label>
+    </div>
+    <div class="row">
+      <label>Token
+        <select id="wf_token">
+          ${TOKEN_TYPES.map(t => `<option value="${t}">${t.toUpperCase()}</option>`).join('')}
+        </select>
+      </label>
+      <label>Amount <input id="wf_amount" type="number" placeholder="0" /></label>
+      <label>Fee <input id="wf_fee" type="number" value="0" /></label>
+    </div>
+    <button type="button" class="primary" data-action="wallet-transfer">Send</button></section>`;
+
+  // Transactions
+  html += `<section><h2>Recent Transactions</h2>`;
+  const txs = d.transactions || [];
+  if (txs.length === 0) {
+    html += `<p class="dim">No transactions yet</p>`;
+  } else {
+    html += `<table><tr><th>Type</th><th>Token</th><th>Amount</th><th>From/To</th><th>Time</th></tr>`;
+    for (const tx of txs.slice(0, 10)) {
+      const tok = tx.token_type || tx.token || '?';
+      const amt = tx.amount ?? '?';
+      const from = esc(String(tx.from || '').slice(0, 16));
+      const to = esc(String(tx.to || '').slice(0, 16));
+      const ts = tx.timestamp ? String(tx.timestamp).slice(0, 19) : '?';
+      const isOut = tx.from === addr;
+      html += `<tr><td>${isOut ? 'OUT' : 'IN'}</td><td>${esc(tok)}</td><td>${amt}</td><td>${isOut ? '→ ' + to : from + ' →'}</td><td>${ts}</td></tr>`;
+    }
+    html += `</table>`;
+  }
+  html += `</section>`;
+
+  // Wallet Gateway (optional account management)
+  html += `<section><h2>Wallet Gateway</h2>
+    <p style="font-size:0.82rem;color:#999;margin-bottom:8px">Login to manage your wallet account on the gateway.</p>`;
+  if (walletLoggedIn) {
+    html += `<p style="color:#00d4aa;font-size:0.85rem">● Logged in</p>
+      <div class="actions">
+        <button type="button" data-action="wallet-gateway-list">List Accounts</button>
+        <button type="button" data-action="wallet-gateway-logout">Logout</button>
+      </div>`;
+    if (walletAccounts.length > 0) {
+      html += `<ul class="peer-list">`;
+      for (const acct of walletAccounts) {
+        html += `<li>${esc(acct)}</li>`;
+      }
+      html += `</ul>`;
+    }
+  } else {
+    html += `<div class="row">
+      <label>Address <input id="wg_address" placeholder="Account address" /></label>
+      <label>Password <input id="wg_password" type="password" placeholder="Password" /></label>
+    </div>
+    <button type="button" data-action="wallet-gateway-login">Sign In</button>`;
+  }
+  html += `</section>`;
+
+  html += `</div>`;
+  el.innerHTML = html;
+}
+
 // ── Dashboard ────────────────────────────────────────────
 
 function startDashboard() {
@@ -385,7 +642,7 @@ async function refreshDashboard() {
   try {
     const [gateway, apiLive, pool, peers, devices, miner, stats] = await Promise.all([
       safeFetch("/status", false),
-      safeFetch("/api/live", true),
+      safeFetch("/status", true),
       safeFetch("/pool", true),
       safeFetch("/network/peers", true),
       safeFetch("/devices", true),
@@ -754,6 +1011,49 @@ async function setPubkeyFromKeypair() {
 function osDefaultKeypath() {
   const home = typeof process !== 'undefined' && process.env?.HOME ? process.env.HOME : '~';
   return home + '/pot-o-miner-cli/miner.json';
+}
+
+// ── Log Viewer ──────────────────────────────────────────
+
+async function refreshLogs() {
+  try {
+    const content = await invoke("read_log", { maxLines: 200 });
+    const el = document.getElementById("log_content");
+    if (el) el.textContent = content || "(empty log)";
+  } catch (e) {
+    const el = document.getElementById("log_content");
+    if (el) el.textContent = `Failed to read log: ${formatError(e)}`;
+  }
+}
+
+async function clearLogs() {
+  try {
+    await invoke("clear_log");
+    const el = document.getElementById("log_content");
+    if (el) el.textContent = "(log cleared)";
+    showToast("Log cleared", "success");
+  } catch (e) {
+      showToast(`Clear failed: ${formatError(e)}`, "error");
+  }
+}
+
+function renderLogsTab() {
+  const el = document.getElementById("tab_logs");
+  if (!el) return;
+  el.innerHTML = `<div class="container">
+    <header>
+      <h1>Error Log</h1>
+      <div class="actions">
+        <button type="button" data-action="refresh-logs">Refresh</button>
+        <button type="button" data-action="clear-logs">Clear</button>
+      </div>
+    </header>
+    <section>
+      <p style="font-size:0.82rem;color:#999;margin-bottom:8px">Log file: ~/.config/pot-o-desktop/pot-o-desktop.log</p>
+      <pre id="log_content" class="log-viewer">(loading...)</pre>
+    </section>
+  </div>`;
+  refreshLogs();
 }
 
 // ── Init ─────────────────────────────────────────────────

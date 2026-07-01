@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
 let config = {};
@@ -6,6 +7,7 @@ let dashboardData = {};
 let dashboardTimer = null;
 let miningTimer = null;
 let lastMiningErrorToast = 0;
+let wsEventUnlisten = [];
 let wsChallengeHandler = null;
 let wsConnected = false;
 let walletData = {};
@@ -170,6 +172,7 @@ async function saveConfig() {
 function gatherFormValues() {
   config.rpc_url = document.getElementById("rpc_url").value;
   config.status_url = document.getElementById("status_url").value;
+  config.ws_url = document.getElementById("ws_url").value;
   config.wallet_base_url = document.getElementById("wallet_base_url").value;
   config.solana_rpc_url = document.getElementById("solana_rpc_url").value;
   config.miner_pubkey = document.getElementById("miner_pubkey").value;
@@ -248,6 +251,7 @@ function renderSettings() {
           <h2>Connection</h2>
           <label>RPC URL <input id="rpc_url" value="${esc(config.rpc_url)}" /></label>
           <label>Status URL <input id="status_url" value="${esc(config.status_url)}" /></label>
+          <label>WebSocket URL <input id="ws_url" value="${esc(config.ws_url || '')}" placeholder="Auto from RPC URL if empty" /></label>
           <label>Wallet Gateway URL <input id="wallet_base_url" value="${esc(config.wallet_base_url)}" placeholder="https://wallet.rpc.gateway.tribewarez.com" /></label>
           <label>Solana RPC URL <input id="solana_rpc_url" value="${esc(config.solana_rpc_url)}" placeholder="Optional" /></label>
           <button type="button" data-action="test-connection">Test Connection</button>
@@ -359,13 +363,9 @@ async function doWsConnect() {
   try {
     const deviceId = await invoke("ws_connect");
     wsConnected = true;
+    updateWsUi();
     showToast(`WS connected (device: ${deviceId.slice(0, 8)}...)`, "success");
-    const connectBtn = document.getElementById("ws-connect-btn");
-    const disconnectBtn = document.getElementById("ws-disconnect-btn");
-    const statusEl = document.getElementById("ws-status");
-    if (connectBtn) connectBtn.disabled = true;
-    if (disconnectBtn) disconnectBtn.disabled = false;
-    if (statusEl) { statusEl.textContent = "● Connected"; statusEl.style.color = "#00d4aa"; }
+    setupWsListeners();
   } catch (e) {
     showToast(`WS connect failed: ${formatError(e)}`, "error");
   }
@@ -375,13 +375,9 @@ async function doWsDisconnect() {
   try {
     await invoke("ws_disconnect");
     wsConnected = false;
+    wsChallengeHandler = null;
+    updateWsUi();
     showToast("WS disconnected", "info");
-    const connectBtn = document.getElementById("ws-connect-btn");
-    const disconnectBtn = document.getElementById("ws-disconnect-btn");
-    const statusEl = document.getElementById("ws-status");
-    if (connectBtn) connectBtn.disabled = false;
-    if (disconnectBtn) disconnectBtn.disabled = true;
-    if (statusEl) { statusEl.textContent = "○ Disconnected"; statusEl.style.color = "#666"; }
   } catch (e) {
     showToast(`WS disconnect failed: ${formatError(e)}`, "error");
   }
@@ -768,7 +764,7 @@ function renderDashboard() {
 
   // WebSocket status in dashboard
   html += `<section><h2>WebSocket</h2>`;
-  html += `<p style="font-size:0.82rem;color:${wsConnected ? '#00d4aa' : '#666'}">${wsConnected ? '● Connected — receiving push challenges' : '○ Not connected'}</p>`;
+  html += `<p id="ws-dashboard-status" style="font-size:0.82rem;color:${wsConnected ? '#00d4aa' : '#666'}">${wsConnected ? '● Connected — receiving push challenges' : '○ Not connected'}</p>`;
   html += `</section>`;
 
   if (config.hexchain_mode) {
@@ -1056,9 +1052,58 @@ function renderLogsTab() {
   refreshLogs();
 }
 
+// ── WebSocket Event Listeners ────────────────────────────
+
+async function setupWsListeners() {
+  for (const unsub of wsEventUnlisten) {
+    try { unsub(); } catch (_) {}
+  }
+  wsEventUnlisten = [];
+  wsChallengeHandler = null;
+
+  const onChallenge = await listen("ws-challenge", (event) => {
+    const challenge = event.payload;
+    wsChallengeHandler = () => Promise.resolve(challenge);
+    showToast("WS challenge received via push", "info");
+  });
+  wsEventUnlisten.push(onChallenge);
+
+  const onDisconnect = await listen("ws-disconnected", () => {
+    wsConnected = false;
+    wsChallengeHandler = null;
+    updateWsUi();
+    showToast("WebSocket disconnected", "info");
+  });
+  wsEventUnlisten.push(onDisconnect);
+
+  const onError = await listen("ws-error", (event) => {
+    const { message } = event.payload;
+    showToast(`WS error: ${message}`, "error");
+  });
+  wsEventUnlisten.push(onError);
+}
+
+function updateWsUi() {
+  const connectBtn = document.getElementById("ws-connect-btn");
+  const disconnectBtn = document.getElementById("ws-disconnect-btn");
+  const statusEl = document.getElementById("ws-status");
+  if (connectBtn) connectBtn.disabled = wsConnected;
+  if (disconnectBtn) disconnectBtn.disabled = !wsConnected;
+  if (statusEl) {
+    statusEl.textContent = wsConnected ? "● Connected" : "○ Disconnected";
+    statusEl.style.color = wsConnected ? "#00d4aa" : "#666";
+  }
+  const wsSection = document.getElementById("ws-dashboard-status");
+  if (wsSection) {
+    wsSection.textContent = wsConnected ? "● Connected — receiving push challenges" : "○ Not connected";
+    wsSection.style.color = wsConnected ? "#00d4aa" : "#666";
+  }
+}
+
 // ── Init ─────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", () => {
   initToasts();
   loadConfig();
+  setupWsListeners();
 });

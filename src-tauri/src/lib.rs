@@ -11,8 +11,9 @@ use mining::MiningEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-use tauri::State;
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::watch;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiningStats {
@@ -43,7 +44,8 @@ struct AppState {
     config: Mutex<PotOConfig>,
     engine: Mutex<MiningEngine>,
     stats: Mutex<MiningStats>,
-    ws_connected: AtomicBool,
+    ws_connected: Arc<AtomicBool>,
+    ws_abort: Mutex<Option<watch::Sender<bool>>>,
     wallet: Mutex<Option<wallet::WalletClient>>,
     wallet_logged_in: AtomicBool,
 }
@@ -165,10 +167,13 @@ async fn register_device(
 }
 
 #[tauri::command]
-async fn ws_connect(state: State<'_, AppState>) -> Result<String, String> {
-    let (base_url, device_id) = {
+async fn ws_connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let (ws_url, device_id) = {
         let cfg = state.config.lock().unwrap();
-        (cfg.rpc_url.clone(), cfg.device_id.clone())
+        (cfg.ws_url(), cfg.device_id.clone())
     };
     let did = if device_id.is_empty() {
         uuid::Uuid::new_v4().to_string()
@@ -176,16 +181,61 @@ async fn ws_connect(state: State<'_, AppState>) -> Result<String, String> {
         device_id
     };
 
-    let client = ws_client::WsClient::new(&did, &base_url);
-    let _rx = client.connect().await?;
+    // Create abort signal
+    let (abort_tx, abort_rx) = watch::channel(false);
 
+    // Connect
+    let client = ws_client::WsClient::new(&did);
+    let event_rx = client.connect(&ws_url, abort_rx).await?;
+
+    // Store abort sender so disconnect can signal it
+    *state.ws_abort.lock().unwrap() = Some(abort_tx);
     state.ws_connected.store(true, Ordering::SeqCst);
+
+    // Spawn task to relay WS events to frontend
+    let app_clone = app.clone();
+    let connected_flag = state.ws_connected.clone();
+    tokio::spawn(async move {
+        let mut rx = event_rx;
+        while let Some(event) = rx.recv().await {
+            match &event {
+                ws_client::WsEvent::Challenge(c) => {
+                    let _ = app_clone.emit("ws-challenge", c.clone());
+                }
+                ws_client::WsEvent::HeartbeatAck => {
+                    let _ = app_clone.emit("ws-heartbeat-ack", ());
+                }
+                ws_client::WsEvent::Disconnected => {
+                    connected_flag.store(false, Ordering::SeqCst);
+                    let _ = app_clone.emit("ws-disconnected", ());
+                    break;
+                }
+                ws_client::WsEvent::Subscribed { device_id } => {
+                    let _ = app_clone.emit("ws-subscribed", serde_json::json!({ "device_id": device_id }));
+                }
+                ws_client::WsEvent::ProofAccepted { tx_signature } => {
+                    let _ = app_clone.emit("ws-proof-accepted", serde_json::json!({ "tx_signature": tx_signature }));
+                }
+                ws_client::WsEvent::ProofRejected { reason } => {
+                    let _ = app_clone.emit("ws-proof-rejected", serde_json::json!({ "reason": reason }));
+                }
+                ws_client::WsEvent::Error { code, message } => {
+                    let _ = app_clone.emit("ws-error", serde_json::json!({ "code": code, "message": message }));
+                }
+            }
+        }
+        connected_flag.store(false, Ordering::SeqCst);
+        let _ = app_clone.emit("ws-disconnected", ());
+    });
 
     Ok(did)
 }
 
 #[tauri::command]
 async fn ws_disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(tx) = state.ws_abort.lock().unwrap().take() {
+        let _ = tx.send(true);
+    }
     state.ws_connected.store(false, Ordering::SeqCst);
     Ok(())
 }
@@ -253,7 +303,8 @@ pub fn run() {
             config: Mutex::new(config),
             engine: Mutex::new(MiningEngine::new()),
             stats: Mutex::new(MiningStats::default()),
-            ws_connected: AtomicBool::new(false),
+            ws_connected: Arc::new(AtomicBool::new(false)),
+            ws_abort: Mutex::new(None),
             wallet: Mutex::new(None),
             wallet_logged_in: AtomicBool::new(false),
         })

@@ -2,6 +2,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::watch;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -18,37 +19,27 @@ pub enum WsEvent {
 
 pub struct WsClient {
     pub device_id: String,
-    base_url: String,
     connected: Arc<Mutex<bool>>,
 }
 
 impl WsClient {
-    pub fn new(device_id: &str, base_url: &str) -> Self {
+    pub fn new(device_id: &str) -> Self {
         Self {
             device_id: device_id.to_string(),
-            base_url: base_url.trim_end_matches('/').to_string(),
             connected: Arc::new(Mutex::new(false)),
         }
     }
 
-    #[allow(dead_code)]
     pub async fn is_connected(&self) -> bool {
         *self.connected.lock().await
     }
 
-    /// Connect to the validator WebSocket endpoint.
-    /// Returns a receiver channel for WsEvent messages.
-    /// Spawns background tasks for heartbeat and recv loop.
     pub async fn connect(
         &self,
+        ws_url: &str,
+        mut abort_rx: watch::Receiver<bool>,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<WsEvent>, String> {
-        let ws_url = self
-            .base_url
-            .replace("http://", "ws://")
-            .replace("https://", "wss://")
-            + "/ws";
-
-        let (ws_stream, _) = connect_async(&ws_url)
+        let (ws_stream, _) = connect_async(ws_url)
             .await
             .map_err(|e| format!("WS connect failed: {}", e))?;
 
@@ -74,20 +65,29 @@ impl WsClient {
         // Spawn read loop
         let tx_clone = tx.clone();
         let connected_clone = self.connected.clone();
+        let mut abort = abort_rx.clone();
         tokio::spawn(async move {
             loop {
-                match read.next().await {
-                    Some(Ok(Message::Text(text))) => {
-                        let event = parse_ws_message(&text);
-                        if tx_clone.send(event).is_err() {
-                            break;
+                tokio::select! {
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                let event = parse_ws_message(&text);
+                                if tx_clone.send(event).is_err() {
+                                    break;
+                                }
+                            }
+                            Some(Ok(Message::Close(_))) | None => {
+                                let _ = tx_clone.send(WsEvent::Disconnected);
+                                break;
+                            }
+                            _ => {}
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => {
+                    _ = abort.changed() => {
                         let _ = tx_clone.send(WsEvent::Disconnected);
                         break;
                     }
-                    _ => {}
                 }
             }
             let mut c = connected_clone.lock().await;
@@ -98,21 +98,31 @@ impl WsClient {
         let tx_heartbeat = tx.clone();
         let connected_hb = self.connected.clone();
         let device_id_hb = self.device_id.clone();
+        let mut abort_hb = abort_rx.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                if !*connected_hb.lock().await {
-                    break;
-                }
-                let heartbeat = serde_json::json!({
-                    "type": "heartbeat",
-                    "device_id": device_id_hb,
-                });
-                if write.send(Message::Text(heartbeat.to_string())).await.is_err() {
-                    let mut c = connected_hb.lock().await;
-                    *c = false;
-                    let _ = tx_heartbeat.send(WsEvent::Disconnected);
-                    break;
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {
+                        if !*connected_hb.lock().await {
+                            break;
+                        }
+                        let heartbeat = serde_json::json!({
+                            "type": "heartbeat",
+                            "device_id": device_id_hb,
+                        });
+                        if write.send(Message::Text(heartbeat.to_string())).await.is_err() {
+                            let mut c = connected_hb.lock().await;
+                            *c = false;
+                            let _ = tx_heartbeat.send(WsEvent::Disconnected);
+                            break;
+                        }
+                    }
+                    _ = abort_hb.changed() => {
+                        let mut c = connected_hb.lock().await;
+                        *c = false;
+                        let _ = tx_heartbeat.send(WsEvent::Disconnected);
+                        break;
+                    }
                 }
             }
         });

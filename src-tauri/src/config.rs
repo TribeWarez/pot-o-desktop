@@ -37,6 +37,9 @@ pub struct PotOConfig {
     pub peer_timeout_secs: u64,
     pub challenge_relay_enabled: bool,
 
+    // WebSocket (if empty, derived from rpc_url via scheme replacement)
+    pub ws_url: String,
+
     // Wallet
     pub wallet_base_url: String,
     pub wallet_address: String,
@@ -71,6 +74,7 @@ impl Default for PotOConfig {
             mdns_service_name: "pot-o-desktop".into(),
             peer_timeout_secs: 30,
             challenge_relay_enabled: false,
+            ws_url: String::new(),
             wallet_base_url: "https://wallet.rpc.gateway.tribewarez.com".into(),
             wallet_address: String::new(),
             explain: false,
@@ -102,6 +106,17 @@ impl PotOConfig {
             }
         }
         Self::default()
+    }
+
+    /// Returns the effective WS URL: user-specified or derived from rpc_url.
+    pub fn ws_url(&self) -> String {
+        if !self.ws_url.is_empty() {
+            return self.ws_url.clone();
+        }
+        self.rpc_url
+            .replace("http://", "ws://")
+            .replace("https://", "wss://")
+            + "/ws"
     }
 
     pub fn save(&self) -> Result<(), String> {

@@ -635,6 +635,15 @@ function stopDashboard() {
 
 async function refreshDashboard() {
   if (!document.getElementById("tab_dashboard")) return;
+
+  // If WS is connected and streaming dashboard updates, skip HTTP polling
+  if (wsConnected) {
+    const stats = await invoke("get_mining_stats");
+    dashboardData.stats = stats;
+    renderDashboard();
+    return;
+  }
+
   try {
     const [gateway, apiLive, pool, peers, devices, miner, stats] = await Promise.all([
       safeFetch("/status", false),
@@ -844,83 +853,159 @@ function renderDashboard() {
   el.innerHTML = html;
 }
 
+let miningActive = false;
+
 // ── Mining controls ──────────────────────────────────────
 
 async function doStartMining() {
   await invoke("start_mining");
   showToast("Mining started", "success");
   renderDashboard();
-  runMiningLoop();
+  if (!miningActive) runMiningLoop();
 }
 
 async function doStopMining() {
   await invoke("stop_mining");
+  miningActive = false;
   if (miningTimer) { clearTimeout(miningTimer); miningTimer = null; }
   showToast("Mining stopped", "success");
   renderDashboard();
 }
 
+function waitForWsResult(timeoutMs = 5000) {
+  let done = false;
+  let unsub1, unsub2;
+  const cleanup = () => {
+    if (unsub1) try { unsub1(); } catch (_) {}
+    if (unsub2) try { unsub2(); } catch (_) {}
+  };
+  return new Promise((resolve, reject) => {
+    listen("ws-proof-accepted", (e) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve({ accepted: true, tx_signature: e.payload.tx_signature });
+    }).then((u) => { unsub1 = u; if (done) cleanup(); });
+    listen("ws-proof-rejected", (e) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve({ accepted: false, reason: e.payload.reason });
+    }).then((u) => { unsub2 = u; if (done) cleanup(); });
+    setTimeout(() => {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(new Error("WS submit timeout"));
+    }, timeoutMs);
+  });
+}
+
 async function runMiningLoop() {
-  const stats = await invoke("get_mining_stats");
-  if (!stats.running) return;
-
+  if (miningActive) return;
+  miningActive = true;
   try {
-    let challenge;
+    const stats = await invoke("get_mining_stats");
+    if (!stats.running) { miningActive = false; return; }
 
-    // If WS connected, try to use push challenge (set by wsChallengeHandler)
-    if (wsChallengeHandler) {
-      challenge = await wsChallengeHandler();
-    }
+    try {
+      let challenge;
 
-    // Fallback to HTTP pull
-    if (!challenge || !challenge.id) {
-      challenge = await invoke("rpc_post", {
-        path: "/challenge",
-        body: { device_type: config.device_type || "native" },
-      });
-    }
+      // If WS connected, try to use push challenge (set by wsChallengeHandler)
+      if (wsChallengeHandler) {
+        challenge = await wsChallengeHandler();
+        wsChallengeHandler = null; // consume once — next WS push will set it again
+      }
 
-    if (challenge && challenge.id) {
-      stats.challenges++;
-      stats.last_challenge_id = challenge.id || "";
-      await invoke("set_mining_stats", { stats });
+      // Fallback to HTTP pull
+      if (!challenge || !challenge.id) {
+        challenge = await invoke("rpc_post", {
+          path: "/challenge",
+          body: { device_type: config.device_type || "native" },
+        });
+      }
 
-      const result = config.hexchain_mode
-        ? await invoke("mine_hexchain", { challenge })
-        : await invoke("mine_pot_o", { challenge });
-
-      if (result.status === "proof_found") {
-        stats.proofs_found++;
+      if (challenge && challenge.id) {
+        stats.challenges++;
+        stats.last_challenge_id = challenge.id || "";
         await invoke("set_mining_stats", { stats });
 
-        try {
-          const submitResp = await invoke("rpc_post", {
-            path: "/submit",
-            body: {
-              proof: result.proof,
-              device_id: config.device_id || null,
-              device_type: config.device_type || "native",
-            },
-          });
-          stats.proofs_submitted++;
-          if (submitResp && submitResp.accepted) {
-            stats.proofs_accepted++;
-            showToast("Proof accepted", "success");
-          } else {
-            showToast("Proof submitted (not accepted)", "info");
-          }
+        const result = config.hexchain_mode
+          ? await invoke("mine_hexchain", { challenge })
+          : await invoke("mine_pot_o", { challenge });
+
+        if (result.status === "proof_found") {
+          stats.proofs_found++;
           await invoke("set_mining_stats", { stats });
-        } catch (e) {
-          showMiningError(`Submit failed: ${formatError(e)}`);
+
+          try {
+            // Try WS submission first, fall back to HTTP
+            let accepted = false;
+            if (wsConnected) {
+              try {
+                await invoke("ws_send", {
+                  payload: {
+                    type: "submit_proof",
+                    proof: result.proof,
+                    device_id: config.device_id || null,
+                    device_type: config.device_type || "native",
+                  },
+                });
+                const wsResult = await waitForWsResult(5000);
+                accepted = wsResult.accepted;
+                if (accepted) {
+                  showToast("Proof accepted via WS", "success");
+                } else {
+                  showToast(`Proof rejected: ${wsResult.reason || "unknown"}`, "error");
+                }
+              } catch (e) {
+                // WS failed, fall through to HTTP
+                console.warn("WS submit failed, falling back to HTTP:", e);
+              }
+            }
+
+            if (!wsConnected || accepted === undefined) {
+              const submitResp = await invoke("rpc_post", {
+                path: "/submit",
+                body: {
+                  proof: result.proof,
+                  device_id: config.device_id || null,
+                  device_type: config.device_type || "native",
+                },
+              });
+              if (submitResp && submitResp.accepted) {
+                accepted = true;
+                showToast("Proof accepted", "success");
+              } else {
+                showToast("Proof submitted (not accepted)", "info");
+              }
+            }
+
+            stats.proofs_submitted++;
+            if (accepted) {
+              stats.proofs_accepted++;
+            }
+            await invoke("set_mining_stats", { stats });
+          } catch (e) {
+            showMiningError(`Submit failed: ${formatError(e)}`);
+          }
         }
       }
+    } catch (e) {
+      showMiningError(`Mining cycle: ${formatError(e)}`);
     }
-  } catch (e) {
-    showMiningError(`Mining cycle: ${formatError(e)}`);
-  }
 
-  const delay = (config.loop_delay || 2) * 1000;
-  miningTimer = setTimeout(runMiningLoop, delay);
+    const delay = (config.loop_delay || 2) * 1000;
+    miningTimer = setTimeout(() => {
+      miningActive = false;
+      runMiningLoop();
+    }, delay);
+  } catch (e) {
+    miningActive = false;
+    showMiningError(`Mining error: ${formatError(e)}`);
+    const delay = (config.loop_delay || 2) * 1000;
+    miningTimer = setTimeout(runMiningLoop, delay);
+  }
   renderDashboard();
 }
 
@@ -1062,11 +1147,42 @@ async function setupWsListeners() {
   wsChallengeHandler = null;
 
   const onChallenge = await listen("ws-challenge", (event) => {
-    const challenge = event.payload;
-    wsChallengeHandler = () => Promise.resolve(challenge);
+    const c = event.payload;
+    wsChallengeHandler = () => Promise.resolve(c);
     showToast("WS challenge received via push", "info");
   });
   wsEventUnlisten.push(onChallenge);
+
+  const onConnected = await listen("ws-connected", () => {
+    wsConnected = true;
+    updateWsUi();
+    showToast("WebSocket connected", "success");
+  });
+  wsEventUnlisten.push(onConnected);
+
+  const onReconnecting = await listen("ws-reconnecting", (event) => {
+    const { delay_secs } = event.payload;
+    const el = document.getElementById("ws-dashboard-status");
+    if (el) {
+      el.textContent = `◐ Reconnecting in ${delay_secs}s...`;
+      el.style.color = "#ffa500";
+    }
+    const statusEl = document.getElementById("ws-status");
+    if (statusEl) {
+      statusEl.textContent = `◐ Reconnecting in ${delay_secs}s...`;
+      statusEl.style.color = "#ffa500";
+    }
+  });
+  wsEventUnlisten.push(onReconnecting);
+
+  const onDashboardUpdate = await listen("ws-dashboard-update", (event) => {
+    const data = event.payload;
+    if (data) {
+      Object.assign(dashboardData, data);
+      renderDashboard();
+    }
+  });
+  wsEventUnlisten.push(onDashboardUpdate);
 
   const onDisconnect = await listen("ws-disconnected", () => {
     wsConnected = false;

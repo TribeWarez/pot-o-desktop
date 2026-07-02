@@ -126,6 +126,7 @@ th { color: #00d4aa; font-weight: 600; }
 }
 
 .err { color: #ff6b6b; }
+.ws-reconnecting { color: #ffa500; }
 .dim { color: #666; font-style: italic; }
 .mono { font-family: monospace; }
 .warn { color: #ffa500; font-size: 0.82rem; margin-top: 6px; }

@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::watch;
+use ws_client::WsCmdSender;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiningStats {
@@ -46,6 +47,7 @@ struct AppState {
     stats: Mutex<MiningStats>,
     ws_connected: Arc<AtomicBool>,
     ws_abort: Mutex<Option<watch::Sender<bool>>>,
+    ws_cmd_tx: Arc<Mutex<Option<WsCmdSender>>>,
     wallet: Mutex<Option<wallet::WalletClient>>,
     wallet_logged_in: AtomicBool,
 }
@@ -184,19 +186,22 @@ async fn ws_connect(
     // Create abort signal
     let (abort_tx, abort_rx) = watch::channel(false);
 
-    // Connect
+    // Connect — returns ConnectionHandle with event_rx and cmd_tx
     let client = ws_client::WsClient::new(&did);
-    let event_rx = client.connect(&ws_url, abort_rx).await?;
+    let handle = client.connect(&ws_url, abort_rx).await?;
 
     // Store abort sender so disconnect can signal it
     *state.ws_abort.lock().unwrap() = Some(abort_tx);
+    // Store cmd sender so ws_send command can use it
+    *state.ws_cmd_tx.lock().unwrap() = Some(handle.cmd_tx.clone());
     state.ws_connected.store(true, Ordering::SeqCst);
 
     // Spawn task to relay WS events to frontend
     let app_clone = app.clone();
     let connected_flag = state.ws_connected.clone();
+    let cmd_tx = state.ws_cmd_tx.clone();
     tokio::spawn(async move {
-        let mut rx = event_rx;
+        let mut rx = handle.event_rx;
         while let Some(event) = rx.recv().await {
             match &event {
                 ws_client::WsEvent::Challenge(c) => {
@@ -205,8 +210,19 @@ async fn ws_connect(
                 ws_client::WsEvent::HeartbeatAck => {
                     let _ = app_clone.emit("ws-heartbeat-ack", ());
                 }
+                ws_client::WsEvent::Connected => {
+                    connected_flag.store(true, Ordering::SeqCst);
+                    let _ = app_clone.emit("ws-connected", ());
+                }
+                ws_client::WsEvent::Reconnecting { delay_secs } => {
+                    let _ = app_clone.emit("ws-reconnecting", serde_json::json!({ "delay_secs": delay_secs }));
+                }
+                ws_client::WsEvent::DashboardUpdate(data) => {
+                    let _ = app_clone.emit("ws-dashboard-update", data.clone());
+                }
                 ws_client::WsEvent::Disconnected => {
                     connected_flag.store(false, Ordering::SeqCst);
+                    *cmd_tx.lock().unwrap() = None;
                     let _ = app_clone.emit("ws-disconnected", ());
                     break;
                 }
@@ -225,6 +241,7 @@ async fn ws_connect(
             }
         }
         connected_flag.store(false, Ordering::SeqCst);
+        *cmd_tx.lock().unwrap() = None;
         let _ = app_clone.emit("ws-disconnected", ());
     });
 
@@ -236,6 +253,7 @@ async fn ws_disconnect(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(tx) = state.ws_abort.lock().unwrap().take() {
         let _ = tx.send(true);
     }
+    *state.ws_cmd_tx.lock().unwrap() = None;
     state.ws_connected.store(false, Ordering::SeqCst);
     Ok(())
 }
@@ -243,6 +261,16 @@ async fn ws_disconnect(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 fn ws_is_connected(state: State<AppState>) -> bool {
     state.ws_connected.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+async fn ws_send(state: State<'_, AppState>, payload: Value) -> Result<(), String> {
+    let msg = serde_json::to_string(&payload).map_err(|e| format!("WS serialize error: {}", e))?;
+    let cmd_tx = state.ws_cmd_tx.lock().unwrap();
+    match cmd_tx.as_ref() {
+        Some(sender) => sender.send(msg),
+        None => Err("WS not connected".into()),
+    }
 }
 
 #[tauri::command]
@@ -305,6 +333,7 @@ pub fn run() {
             stats: Mutex::new(MiningStats::default()),
             ws_connected: Arc::new(AtomicBool::new(false)),
             ws_abort: Mutex::new(None),
+            ws_cmd_tx: Arc::new(Mutex::new(None)),
             wallet: Mutex::new(None),
             wallet_logged_in: AtomicBool::new(false),
         })
@@ -327,6 +356,7 @@ pub fn run() {
             ws_connect,
             ws_disconnect,
             ws_is_connected,
+            ws_send,
             wallet_list_accounts,
             wallet_login,
             wallet_is_logged_in,

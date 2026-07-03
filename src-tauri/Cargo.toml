@@ -28,4 +28,6 @@ hexchain-p2p = { git = "https://github.com/TribeWarez/pot-o-validator", version 
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
-url = "2"
+
+[dev-dependencies]
+tempfile = "3"

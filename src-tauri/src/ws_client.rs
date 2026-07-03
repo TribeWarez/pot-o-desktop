@@ -1,8 +1,8 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -36,17 +36,17 @@ impl WsCmdSender {
     }
 
     fn set(&self, tx: mpsc::UnboundedSender<String>) {
-        let mut guard = self.inner.blocking_lock();
+        let mut guard = self.inner.lock().unwrap();
         *guard = Some(tx);
     }
 
     fn clear(&self) {
-        let mut guard = self.inner.blocking_lock();
+        let mut guard = self.inner.lock().unwrap();
         *guard = None;
     }
 
     pub fn send(&self, msg: String) -> Result<(), String> {
-        let guard = self.inner.blocking_lock();
+        let guard = self.inner.lock().unwrap();
         match guard.as_ref() {
             Some(tx) => tx.send(msg).map_err(|_| "WS channel closed".into()),
             None => Err("WS not connected".into()),
@@ -61,19 +61,20 @@ pub struct ConnectionHandle {
 
 pub struct WsClient {
     pub device_id: String,
-    connected: Arc<Mutex<bool>>,
+    connected: Arc<std::sync::Mutex<bool>>,
 }
 
 impl WsClient {
     pub fn new(device_id: &str) -> Self {
         Self {
             device_id: device_id.to_string(),
-            connected: Arc::new(Mutex::new(false)),
+            connected: Arc::new(std::sync::Mutex::new(false)),
         }
     }
 
-    pub async fn is_connected(&self) -> bool {
-        *self.connected.lock().await
+    #[allow(dead_code)]
+    pub fn is_connected(&self) -> bool {
+        *self.connected.lock().unwrap()
     }
 
     /// Connect and return a handle. The connection is automatically
@@ -110,7 +111,7 @@ impl WsClient {
     async fn run_connection_manager(
         ws_url: &str,
         device_id: &str,
-        connected: Arc<Mutex<bool>>,
+        connected: Arc<std::sync::Mutex<bool>>,
         event_tx: mpsc::UnboundedSender<WsEvent>,
         cmd_sender: WsCmdSender,
         mut abort_rx: watch::Receiver<bool>,
@@ -141,7 +142,7 @@ impl WsClient {
                     cmd_sender.set(conn_tx);
 
                     {
-                        let mut c = connected.lock().await;
+                        let mut c = connected.lock().unwrap();
                         *c = true;
                     }
                     let _ = event_tx.send(WsEvent::Connected);
@@ -150,7 +151,7 @@ impl WsClient {
                     if write.send(Message::Text(subscribe.to_string())).await.is_err() {
                         cmd_sender.clear();
                         {
-                            let mut c = connected.lock().await;
+                            let mut c = connected.lock().unwrap();
                             *c = false;
                         }
                         continue;
@@ -211,7 +212,7 @@ impl WsClient {
                                     }
                                 }
                                 _ = heartbeat_interval.tick() => {
-                                    if !*connected_write.lock().await { break; }
+                                    if !*connected_write.lock().unwrap() { break; }
                                     let heartbeat = serde_json::json!({
                                         "type": "heartbeat",
                                         "device_id": device_id_write,
@@ -225,7 +226,7 @@ impl WsClient {
                             }
                         }
 
-                        let mut c = connected_write.lock().await;
+                        let mut c = connected_write.lock().unwrap();
                         let was_connected = *c;
                         *c = false;
                         if was_connected {
@@ -267,6 +268,116 @@ impl WsClient {
                     backoff = std::cmp::min(backoff * 2, 30);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_challenge_message() {
+        let json = r#"{"type":"challenge","challenge_json":"{\"id\":\"abc123\",\"slot_hash\":\"deadbeef\"}"}"#;
+        match parse_ws_message(json) {
+            WsEvent::Challenge(v) => {
+                assert_eq!(v["id"], "abc123");
+                assert_eq!(v["slot_hash"], "deadbeef");
+            }
+            _ => panic!("Expected Challenge event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_challenge_invalid_json() {
+        let json = r#"{"type":"challenge","challenge_json":"not-json"}"#;
+        match parse_ws_message(json) {
+            WsEvent::Error { code, .. } => assert_eq!(code, "parse"),
+            _ => panic!("Expected Error event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_proof_accepted() {
+        let json = r#"{"type":"proof_accepted","tx_signature":"sig123"}"#;
+        match parse_ws_message(json) {
+            WsEvent::ProofAccepted { tx_signature } => assert_eq!(tx_signature, "sig123"),
+            _ => panic!("Expected ProofAccepted event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_proof_rejected() {
+        let json = r#"{"type":"proof_rejected","reason":"bad nonce"}"#;
+        match parse_ws_message(json) {
+            WsEvent::ProofRejected { reason } => assert_eq!(reason, "bad nonce"),
+            _ => panic!("Expected ProofRejected event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_heartbeat_ack() {
+        let json = r#"{"type":"heartbeat_ack"}"#;
+        match parse_ws_message(json) {
+            WsEvent::HeartbeatAck => {}
+            _ => panic!("Expected HeartbeatAck event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_subscribed() {
+        let json = r#"{"type":"subscribed","device_id":"dev-1"}"#;
+        match parse_ws_message(json) {
+            WsEvent::Subscribed { device_id } => assert_eq!(device_id, "dev-1"),
+            _ => panic!("Expected Subscribed event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dashboard_update() {
+        let json = r#"{"type":"dashboard_update","data":{"key":"val"}}"#;
+        match parse_ws_message(json) {
+            WsEvent::DashboardUpdate(data) => assert_eq!(data["key"], "val"),
+            _ => panic!("Expected DashboardUpdate event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_error_message() {
+        let json = r#"{"type":"error","code":"rate_limit","message":"too fast"}"#;
+        match parse_ws_message(json) {
+            WsEvent::Error { code, message } => {
+                assert_eq!(code, "rate_limit");
+                assert_eq!(message, "too fast");
+            }
+            _ => panic!("Expected Error event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unknown_type() {
+        let json = r#"{"type":"unknown_type","data":1}"#;
+        match parse_ws_message(json) {
+            WsEvent::Error { code, .. } => assert_eq!(code, "unknown_type"),
+            _ => panic!("Expected Error event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_json() {
+        let json = "not-json-at-all";
+        match parse_ws_message(json) {
+            WsEvent::Error { code, .. } => assert_eq!(code, "parse_error"),
+            _ => panic!("Expected Error event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_proof_accepted_missing_field() {
+        let json = r#"{"type":"proof_accepted"}"#;
+        match parse_ws_message(json) {
+            WsEvent::ProofAccepted { tx_signature } => assert_eq!(tx_signature, ""),
+            _ => panic!("Expected ProofAccepted event"),
         }
     }
 }

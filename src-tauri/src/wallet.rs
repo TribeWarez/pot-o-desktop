@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::time::Duration;
 
 /// Lightweight client for the wallet gateway account management API.
 /// Token & marketplace operations go through the existing RPC client.
@@ -12,6 +13,8 @@ impl WalletClient {
         Self {
             client: reqwest::Client::builder()
                 .cookie_store(true)
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
                 .build()
                 .expect("Failed to build reqwest client"),
             base_url: base_url.trim_end_matches('/').to_string(),

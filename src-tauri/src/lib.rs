@@ -16,7 +16,15 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::watch;
 use ws_client::WsCmdSender;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+fn lock_config<'a>(state: &'a State<'a, AppState>) -> Result<std::sync::MutexGuard<'a, PotOConfig>, String> {
+    state.config.lock().map_err(|e| format!("Config lock poisoned: {}", e))
+}
+
+fn lock_stats<'a>(state: &'a State<'a, AppState>) -> Result<std::sync::MutexGuard<'a, MiningStats>, String> {
+    state.stats.lock().map_err(|e| format!("Stats lock poisoned: {}", e))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MiningStats {
     pub running: bool,
     pub challenges: u64,
@@ -27,24 +35,11 @@ pub struct MiningStats {
     pub last_challenge_id: String,
 }
 
-impl Default for MiningStats {
-    fn default() -> Self {
-        Self {
-            running: false,
-            challenges: 0,
-            proofs_found: 0,
-            proofs_submitted: 0,
-            proofs_accepted: 0,
-            start_time: 0,
-            last_challenge_id: String::new(),
-        }
-    }
-}
-
 struct AppState {
     config: Mutex<PotOConfig>,
     engine: Mutex<MiningEngine>,
     stats: Mutex<MiningStats>,
+    http_client: reqwest::Client,
     ws_connected: Arc<AtomicBool>,
     ws_abort: Mutex<Option<watch::Sender<bool>>>,
     ws_cmd_tx: Arc<Mutex<Option<WsCmdSender>>>,
@@ -53,24 +48,24 @@ struct AppState {
 }
 
 #[tauri::command]
-fn get_config(state: State<AppState>) -> PotOConfig {
-    state.config.lock().unwrap().clone()
+fn get_config(state: State<AppState>) -> Result<PotOConfig, String> {
+    lock_config(&state).map(|g| g.clone())
 }
 
 #[tauri::command]
 fn save_config(state: State<AppState>, config: PotOConfig) -> Result<(), String> {
     config.save()?;
-    *state.config.lock().unwrap() = config;
+    *state.config.lock().map_err(|e| format!("Config lock poisoned: {}", e))? = config;
     Ok(())
 }
 
 #[tauri::command]
 async fn rpc_get(state: State<'_, AppState>, path: String) -> Result<Value, String> {
     let base_url = {
-        let cfg = state.config.lock().unwrap();
+        let cfg = lock_config(&state)?;
         cfg.rpc_url.clone()
     };
-    let rpc = rpc::PotRpc::new(&base_url);
+    let rpc = rpc::PotRpc::with_client(state.http_client.clone(), &base_url);
     rpc.get(&path).await
 }
 
@@ -81,61 +76,80 @@ async fn rpc_post(
     body: Value,
 ) -> Result<Value, String> {
     let base_url = {
-        let cfg = state.config.lock().unwrap();
+        let cfg = lock_config(&state)?;
         cfg.rpc_url.clone()
     };
-    let rpc = rpc::PotRpc::new(&base_url);
+    let rpc = rpc::PotRpc::with_client(state.http_client.clone(), &base_url);
     rpc.post(&path, body).await
 }
 
 #[tauri::command]
 async fn status_api_get(state: State<'_, AppState>, path: String) -> Result<Value, String> {
     let base_url = {
-        let cfg = state.config.lock().unwrap();
+        let cfg = lock_config(&state)?;
         cfg.status_url.clone()
     };
-    let rpc = rpc::PotRpc::new(&base_url);
+    let rpc = rpc::PotRpc::with_client(state.http_client.clone(), &base_url);
     rpc.get(&path).await
 }
 
 #[tauri::command]
 fn mine_pot_o(state: State<AppState>, challenge: Value) -> mining::MiningResult {
-    let config = state.config.lock().unwrap().clone();
-    let engine = state.engine.lock().unwrap();
+    let config = match lock_config(&state) {
+        Ok(g) => g.clone(),
+        Err(_) => return mining::MiningResult {
+            status: "no_proof".into(),
+            proof: None,
+            mml_score: None,
+            reason: Some("config_lock_poisoned".into()),
+        },
+    };
+    let engine = state.engine.lock().unwrap_or_else(|e| e.into_inner());
     engine.mine_pot_o(challenge, &config)
 }
 
 #[tauri::command]
 fn mine_hexchain(state: State<AppState>, challenge: Value) -> mining::MiningResult {
-    let config = state.config.lock().unwrap().clone();
-    let engine = state.engine.lock().unwrap();
+    let config = match lock_config(&state) {
+        Ok(g) => g.clone(),
+        Err(_) => return mining::MiningResult {
+            status: "no_proof".into(),
+            proof: None,
+            mml_score: None,
+            reason: Some("config_lock_poisoned".into()),
+        },
+    };
+    let engine = state.engine.lock().unwrap_or_else(|e| e.into_inner());
     engine.mine_hexchain(challenge, &config)
 }
 
 #[tauri::command]
-fn get_mining_stats(state: State<AppState>) -> MiningStats {
-    state.stats.lock().unwrap().clone()
+fn get_mining_stats(state: State<AppState>) -> Result<MiningStats, String> {
+    lock_stats(&state).map(|g| g.clone())
 }
 
 #[tauri::command]
-fn set_mining_stats(state: State<AppState>, stats: MiningStats) {
-    *state.stats.lock().unwrap() = stats;
+fn set_mining_stats(state: State<AppState>, stats: MiningStats) -> Result<(), String> {
+    *lock_stats(&state)? = stats;
+    Ok(())
 }
 
 #[tauri::command]
-fn start_mining(state: State<AppState>) {
-    let mut stats = state.stats.lock().unwrap();
+fn start_mining(state: State<AppState>) -> Result<(), String> {
+    let mut stats = lock_stats(&state)?;
     stats.running = true;
     stats.start_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    Ok(())
 }
 
 #[tauri::command]
-fn stop_mining(state: State<AppState>) {
-    let mut stats = state.stats.lock().unwrap();
+fn stop_mining(state: State<AppState>) -> Result<(), String> {
+    let mut stats = lock_stats(&state)?;
     stats.running = false;
+    Ok(())
 }
 
 #[tauri::command]
@@ -161,10 +175,10 @@ async fn register_device(
     miner_pubkey: Option<String>,
 ) -> Result<Value, String> {
     let base_url = {
-        let cfg = state.config.lock().unwrap();
+        let cfg = lock_config(&state)?;
         cfg.rpc_url.clone()
     };
-    let rpc = rpc::PotRpc::new(&base_url);
+    let rpc = rpc::PotRpc::with_client(state.http_client.clone(), &base_url);
     rpc.register_device(&device_type, device_id, miner_pubkey).await
 }
 
@@ -174,7 +188,7 @@ async fn ws_connect(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let (ws_url, device_id) = {
-        let cfg = state.config.lock().unwrap();
+        let cfg = lock_config(&state)?;
         (cfg.ws_url(), cfg.device_id.clone())
     };
     let did = if device_id.is_empty() {
@@ -191,9 +205,9 @@ async fn ws_connect(
     let handle = client.connect(&ws_url, abort_rx).await?;
 
     // Store abort sender so disconnect can signal it
-    *state.ws_abort.lock().unwrap() = Some(abort_tx);
+    *state.ws_abort.lock().map_err(|e| format!("WS abort lock poisoned: {}", e))? = Some(abort_tx);
     // Store cmd sender so ws_send command can use it
-    *state.ws_cmd_tx.lock().unwrap() = Some(handle.cmd_tx.clone());
+    *state.ws_cmd_tx.lock().map_err(|e| format!("WS cmd_tx lock poisoned: {}", e))? = Some(handle.cmd_tx.clone());
     state.ws_connected.store(true, Ordering::SeqCst);
 
     // Spawn task to relay WS events to frontend
@@ -222,7 +236,9 @@ async fn ws_connect(
                 }
                 ws_client::WsEvent::Disconnected => {
                     connected_flag.store(false, Ordering::SeqCst);
-                    *cmd_tx.lock().unwrap() = None;
+                    if let Ok(mut guard) = cmd_tx.lock() {
+                        *guard = None;
+                    }
                     let _ = app_clone.emit("ws-disconnected", ());
                     break;
                 }
@@ -241,7 +257,9 @@ async fn ws_connect(
             }
         }
         connected_flag.store(false, Ordering::SeqCst);
-        *cmd_tx.lock().unwrap() = None;
+        if let Ok(mut guard) = cmd_tx.lock() {
+            *guard = None;
+        }
         let _ = app_clone.emit("ws-disconnected", ());
     });
 
@@ -250,10 +268,10 @@ async fn ws_connect(
 
 #[tauri::command]
 async fn ws_disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(tx) = state.ws_abort.lock().unwrap().take() {
+    if let Some(tx) = state.ws_abort.lock().map_err(|e| format!("WS abort lock poisoned: {}", e))?.take() {
         let _ = tx.send(true);
     }
-    *state.ws_cmd_tx.lock().unwrap() = None;
+    *state.ws_cmd_tx.lock().map_err(|e| format!("WS cmd_tx lock poisoned: {}", e))? = None;
     state.ws_connected.store(false, Ordering::SeqCst);
     Ok(())
 }
@@ -266,7 +284,7 @@ fn ws_is_connected(state: State<AppState>) -> bool {
 #[tauri::command]
 async fn ws_send(state: State<'_, AppState>, payload: Value) -> Result<(), String> {
     let msg = serde_json::to_string(&payload).map_err(|e| format!("WS serialize error: {}", e))?;
-    let cmd_tx = state.ws_cmd_tx.lock().unwrap();
+    let cmd_tx = state.ws_cmd_tx.lock().map_err(|e| format!("WS cmd_tx lock poisoned: {}", e))?;
     match cmd_tx.as_ref() {
         Some(sender) => sender.send(msg),
         None => Err("WS not connected".into()),
@@ -275,12 +293,29 @@ async fn ws_send(state: State<'_, AppState>, payload: Value) -> Result<(), Strin
 
 #[tauri::command]
 async fn wallet_list_accounts(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    let base_url = {
-        let cfg = state.config.lock().unwrap();
-        cfg.wallet_base_url.clone()
-    };
-    let client = wallet::WalletClient::new(&base_url);
-    client.list_accounts().await
+    // Take the wallet client out of state to avoid holding MutexGuard across await.
+    let client = state.wallet.lock()
+        .map_err(|e| format!("Wallet lock poisoned: {}", e))?
+        .take();
+
+    match client {
+        Some(c) => {
+            let result = c.list_accounts().await;
+            // Put the client back if still logged in
+            if result.is_ok() && state.wallet_logged_in.load(Ordering::SeqCst) {
+                let _ = state.wallet.lock().map_err(|e| format!("Wallet lock poisoned: {}", e))?.replace(c);
+            }
+            result
+        }
+        None => {
+            let base_url = {
+                let cfg = lock_config(&state)?;
+                cfg.wallet_base_url.clone()
+            };
+            let client = wallet::WalletClient::new(&base_url);
+            client.list_accounts().await
+        }
+    }
 }
 
 #[tauri::command]
@@ -290,12 +325,12 @@ async fn wallet_login(
     password: String,
 ) -> Result<(), String> {
     let base_url = {
-        let cfg = state.config.lock().unwrap();
+        let cfg = lock_config(&state)?;
         cfg.wallet_base_url.clone()
     };
     let client = wallet::WalletClient::new(&base_url);
     client.login(&address, &password).await?;
-    *state.wallet.lock().unwrap() = Some(client);
+    *state.wallet.lock().map_err(|e| format!("Wallet lock poisoned: {}", e))? = Some(client);
     state.wallet_logged_in.store(true, Ordering::SeqCst);
     Ok(())
 }
@@ -306,9 +341,10 @@ fn wallet_is_logged_in(state: State<AppState>) -> bool {
 }
 
 #[tauri::command]
-fn wallet_logout(state: State<AppState>) {
-    *state.wallet.lock().unwrap() = None;
+fn wallet_logout(state: State<AppState>) -> Result<(), String> {
+    *state.wallet.lock().map_err(|e| format!("Wallet lock poisoned: {}", e))? = None;
     state.wallet_logged_in.store(false, Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
@@ -331,6 +367,11 @@ pub fn run() {
             config: Mutex::new(config),
             engine: Mutex::new(MiningEngine::new()),
             stats: Mutex::new(MiningStats::default()),
+            http_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("Failed to build shared reqwest client"),
             ws_connected: Arc::new(AtomicBool::new(false)),
             ws_abort: Mutex::new(None),
             ws_cmd_tx: Arc::new(Mutex::new(None)),

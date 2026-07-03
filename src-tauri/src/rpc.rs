@@ -1,5 +1,6 @@
 use reqwest::Client;
 use serde_json::Value;
+use std::time::Duration;
 
 pub struct PotRpc {
     client: Client,
@@ -7,16 +8,23 @@ pub struct PotRpc {
 }
 
 impl PotRpc {
+    #[allow(dead_code)]
     pub fn new(base_url: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("Failed to build reqwest client"),
             base_url: base_url.trim_end_matches('/').to_string(),
         }
     }
 
-    #[allow(dead_code)]
-    pub fn set_base_url(&mut self, url: &str) {
-        self.base_url = url.trim_end_matches('/').to_string();
+    pub fn with_client(client: Client, base_url: &str) -> Self {
+        Self {
+            client,
+            base_url: base_url.trim_end_matches('/').to_string(),
+        }
     }
 
     async fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
@@ -29,11 +37,8 @@ impl PotRpc {
             }
             _ => return Err(format!("Unsupported method: {}", method)),
         };
-        let resp = match req
-            .timeout(std::time::Duration::from_secs(if method == "GET" { 30 } else { 60 }))
-            .send()
-            .await
-        {
+        let timeout_dur = Duration::from_secs(if method == "GET" { 30 } else { 60 });
+        let resp = match req.timeout(timeout_dur).send().await {
             Ok(r) => r,
             Err(e) => {
                 let msg = format!("{} {} — connection failed: {}", method, url, e);
@@ -68,23 +73,6 @@ impl PotRpc {
         self.request("POST", path, Some(&body)).await
     }
 
-    #[allow(dead_code)]
-    pub async fn submit_proof(
-        &self,
-        proof: Value,
-        device_id: Option<String>,
-        device_type: Option<String>,
-    ) -> Result<Value, String> {
-        let mut body = serde_json::json!({ "proof": proof });
-        if let Some(did) = device_id {
-            body["device_id"] = Value::String(did);
-        }
-        if let Some(dt) = device_type {
-            body["device_type"] = Value::String(dt);
-        }
-        self.post("/submit", body).await
-    }
-
     pub async fn register_device(
         &self,
         device_type: &str,
@@ -99,5 +87,28 @@ impl PotRpc {
             body["miner_pubkey"] = Value::String(pk);
         }
         self.post("/devices/register", body).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_trims_trailing_slash() {
+        let rpc = PotRpc::new("https://example.com/");
+        assert_eq!(rpc.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn test_new_no_trailing_slash() {
+        let rpc = PotRpc::new("https://example.com");
+        assert_eq!(rpc.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn test_new_empty_path() {
+        let rpc = PotRpc::new("");
+        assert_eq!(rpc.base_url, "");
     }
 }

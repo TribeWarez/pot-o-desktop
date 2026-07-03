@@ -8,6 +8,7 @@ let dashboardTimer = null;
 let miningTimer = null;
 let lastMiningErrorToast = 0;
 let wsEventUnlisten = [];
+let wsListenersSetup = false;
 let wsChallengeHandler = null;
 let wsConnected = false;
 let walletData = {};
@@ -874,10 +875,11 @@ async function doStopMining() {
 
 function waitForWsResult(timeoutMs = 5000) {
   let done = false;
-  let unsub1, unsub2;
+  let unsub1, unsub2, unsub3;
   const cleanup = () => {
     if (unsub1) try { unsub1(); } catch (_) {}
     if (unsub2) try { unsub2(); } catch (_) {}
+    if (unsub3) try { unsub3(); } catch (_) {}
   };
   return new Promise((resolve, reject) => {
     listen("ws-proof-accepted", (e) => {
@@ -892,6 +894,12 @@ function waitForWsResult(timeoutMs = 5000) {
       cleanup();
       resolve({ accepted: false, reason: e.payload.reason });
     }).then((u) => { unsub2 = u; if (done) cleanup(); });
+    listen("ws-error", (e) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(new Error(`WS error: ${e.payload.message}`));
+    }).then((u) => { unsub3 = u; if (done) cleanup(); });
     setTimeout(() => {
       if (done) return;
       done = true;
@@ -1090,8 +1098,7 @@ async function setPubkeyFromKeypair() {
 }
 
 function osDefaultKeypath() {
-  const home = typeof process !== 'undefined' && process.env?.HOME ? process.env.HOME : '~';
-  return home + '/pot-o-miner-cli/miner.json';
+  return '~/pot-o-miner-cli/miner.json';
 }
 
 // ── Log Viewer ──────────────────────────────────────────
@@ -1140,6 +1147,8 @@ function renderLogsTab() {
 // ── WebSocket Event Listeners ────────────────────────────
 
 async function setupWsListeners() {
+  if (wsListenersSetup) return;
+  wsListenersSetup = true;
   for (const unsub of wsEventUnlisten) {
     try { unsub(); } catch (_) {}
   }

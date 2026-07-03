@@ -13,14 +13,12 @@ pub struct KeypairInfo {
 
 /// Generate a new Ed25519 keypair, save to path, return pubkey
 pub fn generate_keypair(path: &str) -> Result<KeypairInfo, String> {
-    let mut secret = [0u8; 32];
     use rand::RngCore;
+    let mut secret = [0u8; 32];
     OsRng.fill_bytes(&mut secret);
-
     let secret_key = ed25519_dalek::SecretKey::from(secret);
     let signing_key = SigningKey::from_bytes(&secret_key);
-    let verifying_key = signing_key.verifying_key();
-    let pubkey = hex::encode(verifying_key.as_bytes());
+    let pubkey = hex::encode(signing_key.verifying_key().as_bytes());
 
     let vec: Vec<u8> = signing_key.to_bytes().to_vec();
     let json = serde_json::to_string(&vec).map_err(|e| e.to_string())?;
@@ -90,5 +88,127 @@ pub fn is_solana_keypair(path: &str) -> bool {
             .map(|v| v.len() == 64)
             .unwrap_or(false),
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::RngCore;
+    use std::fs;
+
+    fn create_signing_key() -> SigningKey {
+        let mut secret = [0u8; 32];
+        OsRng.fill_bytes(&mut secret);
+        let secret_key = ed25519_dalek::SecretKey::from(secret);
+        SigningKey::from_bytes(&secret_key)
+    }
+
+    #[test]
+    fn test_generate_and_read_keypair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-keypair.json");
+        let path_str = path.to_str().unwrap();
+
+        let info = generate_keypair(path_str).unwrap();
+        assert_eq!(info.path, path_str);
+        assert!(info.exists);
+        assert!(info.is_keypair);
+        assert_eq!(info.pubkey.len(), 64); // 32 bytes = 64 hex chars
+
+        let read_info = pubkey_from_file(path_str).unwrap();
+        assert_eq!(read_info.pubkey, info.pubkey);
+        assert!(read_info.is_keypair);
+    }
+
+    #[test]
+    fn test_read_non_existent_file() {
+        let result = pubkey_from_file("/nonexistent/path/keypair.json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_is_solana_keypair_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("solana-kp.json");
+        let path_str = path.to_str().unwrap();
+
+        // Create a 64-byte keypair
+        let kp = create_signing_key();
+        let bytes: Vec<u8> = kp.to_bytes().to_vec();
+        assert_eq!(bytes.len(), 64);
+        let json = serde_json::to_string(&bytes).unwrap();
+        fs::write(path_str, &json).unwrap();
+
+        assert!(is_solana_keypair(path_str));
+    }
+
+    #[test]
+    fn test_is_solana_keypair_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-keypair.json");
+        let path_str = path.to_str().unwrap();
+
+        // 32-byte array is not a full keypair
+        let bytes: Vec<u8> = vec![0u8; 32];
+        let json = serde_json::to_string(&bytes).unwrap();
+        fs::write(path_str, &json).unwrap();
+
+        assert!(!is_solana_keypair(path_str));
+    }
+
+    #[test]
+    fn test_is_solana_keypair_missing_file() {
+        assert!(!is_solana_keypair("/nonexistent/path.json"));
+    }
+
+    #[test]
+    fn test_is_solana_keypair_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.json");
+        let path_str = path.to_str().unwrap();
+        fs::write(path_str, "not json").unwrap();
+        assert!(!is_solana_keypair(path_str));
+    }
+
+    #[test]
+    fn test_read_arbitrary_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("arb.json");
+        let path_str = path.to_str().unwrap();
+
+        let bytes: Vec<u8> = vec![1, 2, 3, 4, 5];
+        let json = serde_json::to_string(&bytes).unwrap();
+        fs::write(path_str, &json).unwrap();
+
+        let info = pubkey_from_file(path_str).unwrap();
+        assert!(!info.is_keypair);
+        assert_eq!(info.pubkey, hex::encode(&bytes));
+    }
+
+    #[test]
+    fn test_read_raw_32byte_pubkey() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pubkey.json");
+        let path_str = path.to_str().unwrap();
+
+        let kp = create_signing_key();
+        let pubkey_bytes = kp.verifying_key().as_bytes().to_vec();
+        assert_eq!(pubkey_bytes.len(), 32);
+        let json = serde_json::to_string(&pubkey_bytes).unwrap();
+        fs::write(path_str, &json).unwrap();
+
+        let info = pubkey_from_file(path_str).unwrap();
+        assert!(!info.is_keypair);
+        assert_eq!(info.pubkey, hex::encode(&pubkey_bytes));
+    }
+
+    #[test]
+    fn test_generated_keypair_is_solana_keypair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp.json");
+        let path_str = path.to_str().unwrap();
+        generate_keypair(path_str).unwrap();
+        assert!(is_solana_keypair(path_str));
     }
 }

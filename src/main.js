@@ -925,8 +925,11 @@ async function runMiningLoop() {
         wsChallengeHandler = null; // consume once — next WS push will set it again
       }
 
-      // Fallback to HTTP pull
-      if (!challenge || !challenge.id) {
+      // Fallback to HTTP pull if WS challenge is missing or lacks tensor data
+      if (!challenge || !challenge.id || !challenge.input_tensor?.data?.F32) {
+        if (challenge && challenge.id && !challenge.input_tensor?.data?.F32) {
+          console.warn("WS challenge lacks tensor data — falling back to HTTP /challenge");
+        }
         challenge = await invoke("rpc_post", {
           path: "/challenge",
           body: { device_type: config.device_type || "native" },
@@ -941,6 +944,10 @@ async function runMiningLoop() {
         const result = config.hexchain_mode
           ? await invoke("mine_hexchain", { challenge })
           : await invoke("mine_pot_o", { challenge });
+
+        if (result.reason) {
+          console.warn("Mining result:", result.status, result.reason, "mml_score:", result.mml_score);
+        }
 
         if (result.status === "proof_found") {
           stats.proofs_found++;

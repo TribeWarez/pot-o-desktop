@@ -32,7 +32,12 @@ pub fn generate_keypair(path: &str) -> Result<KeypairInfo, String> {
     })
 }
 
-/// Extract pubkey from a keypair file
+/// Extract pubkey from a keypair file.
+///
+/// Recognises three formats:
+/// - 64 bytes: Solana full keypair (secret || pubkey)
+/// - 32 bytes: either a raw public key, or a secret key (from which we derive the pubkey)
+/// - anything else: hex-encoded verbatim
 pub fn pubkey_from_file(path: &str) -> Result<KeypairInfo, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
     let bytes: Vec<u8> =
@@ -40,7 +45,6 @@ pub fn pubkey_from_file(path: &str) -> Result<KeypairInfo, String> {
 
     if bytes.len() == 64 {
         // Solana keypair format — bytes [0..32] are secret, bytes [32..64] are pubkey
-        // We can derive pubkey from secret
         let kp_bytes: [u8; 64] = bytes[..64]
             .try_into()
             .map_err(|_| "Invalid keypair length".to_string())?;
@@ -54,18 +58,30 @@ pub fn pubkey_from_file(path: &str) -> Result<KeypairInfo, String> {
             is_keypair: true,
         })
     } else if bytes.len() == 32 {
-        // Raw 32-byte public key
-        let pk_bytes: [u8; 32] = bytes[..32]
+        let arr: [u8; 32] = bytes[..32]
             .try_into()
-            .map_err(|_| "Invalid pubkey length".to_string())?;
-        let verifying_key =
-            VerifyingKey::from_bytes(&pk_bytes).map_err(|e| format!("Invalid pubkey: {}", e))?;
-        let pubkey = hex::encode(verifying_key.as_bytes());
+            .map_err(|_| "Invalid byte array length".to_string())?;
+
+        // First, try as a raw public key
+        if let Ok(vk) = VerifyingKey::from_bytes(&arr) {
+            return Ok(KeypairInfo {
+                pubkey: hex::encode(vk.as_bytes()),
+                path: path.to_string(),
+                exists: true,
+                is_keypair: false,
+            });
+        }
+
+        // Fallback: treat as a secret key and derive the pubkey.
+        // This handles files written by our own generate_keypair.
+        let secret_key = ed25519_dalek::SecretKey::from(arr);
+        let signing_key = SigningKey::from_bytes(&secret_key);
+        let pubkey = hex::encode(signing_key.verifying_key().as_bytes());
         Ok(KeypairInfo {
             pubkey,
             path: path.to_string(),
             exists: true,
-            is_keypair: false,
+            is_keypair: true,
         })
     } else {
         Ok(KeypairInfo {
@@ -204,11 +220,36 @@ mod tests {
     }
 
     #[test]
-    fn test_generated_keypair_is_solana_keypair() {
+    fn test_generated_keypair_can_be_read_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("kp.json");
         let path_str = path.to_str().unwrap();
-        generate_keypair(path_str).unwrap();
-        assert!(is_solana_keypair(path_str));
+        let gen = generate_keypair(path_str).unwrap();
+
+        // Generated file is 32 bytes (secret key only), not 64
+        assert!(!is_solana_keypair(path_str));
+
+        // But it must load back successfully via the secret-key fallback
+        let loaded = pubkey_from_file(path_str).unwrap();
+        assert_eq!(loaded.pubkey, gen.pubkey);
+        assert!(loaded.is_keypair);
+    }
+
+    #[test]
+    fn test_secret_key_bytes_load_as_keypair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.json");
+        let path_str = path.to_str().unwrap();
+
+        // Write just the 32-byte secret key
+        let sk = create_signing_key();
+        let secret_bytes: Vec<u8> = sk.to_bytes().to_vec();
+        assert_eq!(secret_bytes.len(), 32);
+        let json = serde_json::to_string(&secret_bytes).unwrap();
+        fs::write(path_str, &json).unwrap();
+
+        let info = pubkey_from_file(path_str).unwrap();
+        assert!(info.is_keypair);
+        assert_eq!(info.pubkey, hex::encode(sk.verifying_key().as_bytes()));
     }
 }

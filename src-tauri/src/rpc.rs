@@ -51,7 +51,11 @@ impl PotRpc {
         if !status.is_success() {
             let preview = text.chars().take(300).collect::<String>();
             let msg = format!("{} {} — HTTP {}: {}", method, url, status, preview);
-            crate::logger::error("rpc", &msg);
+            if status.as_u16() >= 500 {
+                crate::logger::warn("rpc", &msg);
+            } else {
+                crate::logger::error("rpc", &msg);
+            }
             return Err(msg);
         }
         match serde_json::from_str::<Value>(&text) {

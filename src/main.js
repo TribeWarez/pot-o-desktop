@@ -682,8 +682,9 @@ async function safeFetch(path, isPot) {
   try {
     if (isPot) return await invoke("rpc_get", { path });
     else return await invoke("status_api_get", { path });
-  } catch {
-    return { _error: "fetch failed" };
+  } catch (e) {
+    const msg = typeof e === "string" ? e : (e.message || "fetch failed");
+    return { _error: msg };
   }
 }
 

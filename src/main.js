@@ -77,6 +77,18 @@ document.addEventListener("click", async (e) => {
     return;
   }
 
+  const toggleBtn = e.target.closest("[data-toggle]");
+  if (toggleBtn) {
+    const targetId = toggleBtn.dataset.toggle;
+    const target = document.getElementById(targetId);
+    if (target) {
+      const expanded = target.style.display !== "none";
+      target.style.display = expanded ? "none" : "";
+      toggleBtn.classList.toggle("collapsed", expanded);
+    }
+    return;
+  }
+
   const actionBtn = e.target.closest("[data-action]");
   if (!actionBtn) return;
 
@@ -429,23 +441,20 @@ async function refreshWallet() {
   const balances = {};
   await Promise.all(TOKEN_TYPES.map(async (tok) => {
     try {
-      const r = await invoke("rpc_get", { path: `/token/balance/${addr}/${tok}` });
+      const r = await invoke("status_api_get", { path: `/api/balance/${addr}/${tok}` });
       balances[tok] = r.balance;
     } catch { balances[tok] = null; }
   }));
   results.balances = balances;
   try {
-    const txData = await invoke("rpc_get", { path: `/token/tx/${addr}` });
+    const txData = await invoke("status_api_get", { path: `/api/transactions/${addr}` });
     results.transactions = txData.transactions || [];
   } catch { results.transactions = []; }
   try {
-    const tribe = await invoke("rpc_get", { path: "/token/tribe/address" });
-    results.tribeAddress = tribe.address || "—";
-  } catch { results.tribeAddress = null; }
-  try {
-    const supply = await invoke("rpc_get", { path: "/token/tribe/supply" });
-    results.tribeSupply = supply.supply;
-    results.tribeMinted = supply.total_minted;
+    const supply = await invoke("status_api_get", { path: "/api/supply" });
+    results.tribeAddress = "TRIBE";
+    results.tribeSupply = supply.TRIBE;
+    results.tribeMinted = supply.TRIBE;
   } catch { results.tribeSupply = null; }
   walletData = results;
   renderWallet();
@@ -649,36 +658,36 @@ async function refreshDashboard() {
   }
 
   try {
-    const [gateway, apiLive, pool, peers, devices, miner, stats] = await Promise.all([
+    const [gateway, apiLive, hexStatus, hexLattice, stats] = await Promise.all([
       safeFetch("/status", false),
-      safeFetch("/status", true),
-      safeFetch("/pool", true),
-      safeFetch("/network/peers", true),
-      safeFetch("/devices", true),
-      config.miner_pubkey ? safeFetch("/miners/" + encodeURIComponent(config.miner_pubkey), true) : null,
+      safeFetch("/api/live", false),
+      config.hexchain_mode ? safeFetch("/api/hexchain/status", false) : null,
+      config.hexchain_mode ? safeFetch("/api/hexchain/lattice", false) : null,
       invoke("get_mining_stats"),
     ]);
     dashboardData.gateway = gateway;
     dashboardData.apiLive = apiLive;
-    dashboardData.pool = pool;
-    dashboardData.peers = peers;
-    dashboardData.devices = devices;
-    dashboardData.miner = miner;
+    dashboardData.pool = apiLive?.telemetry?.pool?.data;
+    dashboardData.peers = apiLive?.pot_o?.connected_peers;
+    dashboardData.miner = findMinerInLive(apiLive, config.miner_pubkey);
+    dashboardData.hexStatus = hexStatus;
+    dashboardData.hexLattice = hexLattice;
     dashboardData.stats = stats;
-
-    if (config.hexchain_mode) {
-      const [hstatus, hlattice] = await Promise.all([
-        safeFetch("/hexchain/status", true),
-        safeFetch("/hexchain/lattice", true),
-      ]);
-      dashboardData.hexStatus = hstatus;
-      dashboardData.hexLattice = hlattice;
-    }
 
     renderDashboard();
   } catch (e) {
     console.error("Dashboard refresh error:", e);
   }
+}
+
+function findMinerInLive(apiLive, pubkey) {
+  if (!pubkey || !apiLive?.pot_o?.devices_detail) return null;
+  for (const dev of Object.values(apiLive.pot_o.devices_detail)) {
+    if (dev.miner_pubkeys && dev.miner_pubkeys.includes(pubkey)) {
+      return { pubkey, ...dev };
+    }
+  }
+  return { _error: "404 Not found" };
 }
 
 async function safeFetch(path, isPot) {
@@ -805,33 +814,6 @@ function renderDashboard() {
   html += `<p id="ws-dashboard-status" style="font-size:0.82rem;color:${wsConnected ? '#00d4aa' : '#666'}">${wsConnected ? '● Connected — receiving push challenges' : '○ Not connected'}</p>`;
   html += `</section>`;
 
-  if (config.hexchain_mode) {
-    html += `<section><h2>Hexchain Lattice</h2>`;
-    const hs = d.hexStatus || {};
-    if (hs._error) {
-      html += `<p class="err">${hs._error}</p>`;
-    } else {
-      html += `<div class="grid-2">
-        <div><strong>Occupied:</strong> ${hs.occupied_coords ?? '—'}</div>
-        <div><strong>Depth:</strong> ${hs.latest_depth ?? '—'}</div>`;
-      const hch = hs.current_challenge || {};
-      if (hch.id) {
-        html += `<div><strong>Challenge:</strong> id=${esc(String(hch.id).slice(0,24))} coord=${JSON.stringify(hch.coord||{})}</div>`;
-      }
-      html += `</div>`;
-      const hblocks = (d.hexLattice && d.hexLattice.blocks) || [];
-      if (hblocks.length) {
-        html += `<table><tr><th>Coord</th><th>Depth</th><th>Hash</th></tr>`;
-        for (const b of hblocks.slice(0, 5)) {
-          const hash = b.block_hash || '?';
-          html += `<tr><td>${JSON.stringify(b.coord||{})}</td><td>${b.depth??'?'}</td><td class="mono">${esc(String(hash).slice(0,16))}</td></tr>`;
-        }
-        html += `</table>`;
-      }
-    }
-    html += `</section>`;
-  }
-
   html += `<section><h2>Pool</h2>`;
   const pool = d.pool || {};
   if (pool._error) {
@@ -859,24 +841,73 @@ function renderDashboard() {
     html += `</section>`;
   }
 
-  html += `<section><h2>Network Peers</h2>`;
+  // ── P2P + Hex Lattice ───────────────────────────────
   const peers = d.peers;
-  if (!peers || peers._error) {
-    html += `<p class="dim">${peers ? peers._error : 'No data'}</p>`;
-  } else {
-    const list = Array.isArray(peers) ? peers : (peers.peers || []);
-    if (list.length) {
-      html += `<ul class="peer-list">`;
-      for (const p of list.slice(0, 10)) {
-        const s = typeof p === 'string' ? p : JSON.stringify(p);
-        html += `<li>${esc(s.slice(0,80))}</li>`;
-      }
-      html += `</ul>`;
-    } else {
-      html += `<p class="dim">(none or local_only)</p>`;
+  const peerCount = Array.isArray(peers) ? peers.length : 0;
+  const liveData = dashboardData.apiLive;
+  const pot = liveData?.pot_o || liveData || {};
+  const p2pMode = pot.peer_network_mode || '—';
+  const net = pot.network || {};
+  const synced = net.synced;
+  const totalNodes = net.total_nodes ?? '—';
+  const hexLatticeBlocks = (dashboardData.hexLattice && dashboardData.hexLattice.blocks) || [];
+  html += `<section>
+    <h2 class="collapsible" data-toggle="p2p-section">Connected Peers <span class="peer-cnt">(${peerCount})</span></h2>
+    <div id="p2p-section">
+      <div class="p2p-mode-line">
+        <strong>P2P mode:</strong> ${esc(p2pMode)}
+        <span class="dim">${peerCount > 0 ? '' : '(awaiting peers)'}</span>
+        <span class="p2p-stats">· <strong>Network:</strong> ${totalNodes} node${totalNodes !== 1 ? 's' : ''} · ${synced ? 'Synced' : 'Not synced'}</span>
+      </div>`;
+
+  if (peerCount > 0) {
+    html += `<div class="peer-list-section"><strong class="label">Connected:</strong><ul class="peer-list">`;
+    for (const p of peers.slice(0, 20)) {
+      const s = typeof p === 'string' ? p : JSON.stringify(p);
+      html += `<li>${esc(s.slice(0, 80))}</li>`;
     }
+    html += `</ul></div>`;
+  } else {
+    html += `<p class="dim" style="margin-top:6px">No peers connected</p>`;
   }
-  html += `</section>`;
+
+  // Hex chain lattice — show if hexchain mode or data exists
+  if (config.hexchain_mode || hexLatticeBlocks.length > 0) {
+    const hs = dashboardData.hexStatus || {};
+    html += `<div class="hex-lattice-section">
+      <h3>Hex Chain Lattice <span class="dim">(3D honeycomb)</span></h3>
+      <div class="grid-2">
+        <div><strong>Occupied:</strong> ${hs.occupied_coords ?? (hexLatticeBlocks.length || '—')}</div>
+        <div><strong>Depth:</strong> ${hs.latest_depth ?? '—'}</div>`;
+    const hch = hs.current_challenge || {};
+    if (hch.id) {
+      html += `<div><strong>Challenge:</strong> id=${esc(String(hch.id).slice(0, 24))} coord=${JSON.stringify(hch.coord || {})}</div>`;
+    }
+    html += `</div>`;
+
+    if (hexLatticeBlocks.length > 0) {
+      html += `<div class="honeycomb">`;
+      for (const b of hexLatticeBlocks.slice(0, 30)) {
+        const coord = b.coord || {};
+        const q = coord.q ?? coord[0] ?? '';
+        const r = coord.r ?? coord[1] ?? '';
+        const s = coord.s ?? coord[2] ?? '';
+        const depth = b.depth ?? '?';
+        const hash = (b.block_hash || '').slice(0, 8);
+        html += `<div class="hex-cell" title="q=${q} r=${r} s=${s} depth=${depth} hash=${hash}">
+          <span class="hex-coord">${q},${r},${s}</span>
+          <span class="hex-depth">d:${depth}</span>
+          <span class="hex-hash">${hash}</span>
+        </div>`;
+      }
+      html += `</div>`;
+    } else {
+      html += `<p class="dim" style="margin-top:6px">No lattice blocks yet</p>`;
+    }
+    html += `</div>`;
+  }
+
+  html += `</div></section>`;
 
   html += `</div>`;
   el.innerHTML = html;

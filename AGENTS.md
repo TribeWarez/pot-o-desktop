@@ -41,3 +41,9 @@ npx tauri build      # platform bundles (.deb/.AppImage/.dmg/.msi)
 - CI auto-releases on push to `main` (tagged `v0.1.0+YYYYMMDD-commitsha`)
 - No Rust tests or JS tests exist — do not add without explicit request
 - Frontend is vanilla DOM manipulation — no template engine, no virtual DOM
+
+## v0.9.2 API changes
+
+- `/challenge` POST body requires `slot` + `slot_hash` (challenge `id`) + `device_type` — bare `{device_type}` returns stale cached challenge
+- `/submit` proof.timestamp must be RFC 3339 string, not Unix integer — use `chrono::Utc::now().to_rfc3339()`
+- Status API (`/api/live`) is the source of truth for current slot/challenge ID; validator's `/challenge` returns full tensor data when given the correct slot params

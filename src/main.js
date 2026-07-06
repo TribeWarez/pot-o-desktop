@@ -1100,6 +1100,7 @@ async function runMiningLoop() {
                 path: "/submit",
                 body: {
                   proof: result.proof,
+                  signature: [],
                   device_id: config.device_id || null,
                   device_type: config.device_type || "native",
                 },

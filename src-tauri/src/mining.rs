@@ -173,10 +173,7 @@ impl MiningEngine {
                     nonce as u64,
                 );
 
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                let now = chrono::Utc::now().to_rfc3339();
                 let proof = serde_json::json!({
                     "challenge_id": challenge_id,
                     "challenge_hash": slot_hash,

@@ -1016,15 +1016,35 @@ async function runMiningLoop() {
         wsChallengeHandler = null; // consume once — next WS push will set it again
       }
 
-      // Fallback to HTTP pull if WS challenge is missing or lacks tensor data
+      // Fallback to HTTP pull if WS challenge is missing or lacks tensor data.
+      // First get current slot from status API (which cycles every ~4s on v0.9.2+),
+      // then pass slot+slot_hash to the validator's /challenge endpoint.
       if (!challenge || !challenge.id || !challenge.input_tensor?.data?.F32) {
         if (challenge && challenge.id && !challenge.input_tensor?.data?.F32) {
           console.warn("WS challenge lacks tensor data — falling back to HTTP /challenge");
         }
-        challenge = await invoke("rpc_post", {
-          path: "/challenge",
-          body: { device_type: (config.device_type || "native").toLowerCase() },
-        });
+        try {
+          const liveData = await invoke("status_api_get", { path: "/api/live" });
+          const meta = liveData?.pot_o?.current_challenge || {};
+          if (meta.slot && meta.id) {
+            challenge = await invoke("rpc_post", {
+              path: "/challenge",
+              body: {
+                slot: meta.slot,
+                slot_hash: meta.id,
+                device_type: (config.device_type || "native").toLowerCase(),
+              },
+            });
+          }
+        } catch (_) {
+          // Fallback to bare POST if status API is unreachable
+        }
+        if (!challenge || !challenge.id) {
+          challenge = await invoke("rpc_post", {
+            path: "/challenge",
+            body: { device_type: (config.device_type || "native").toLowerCase() },
+          });
+        }
       }
 
       if (challenge && challenge.id) {

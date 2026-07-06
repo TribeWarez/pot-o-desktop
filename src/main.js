@@ -405,7 +405,7 @@ async function doRegisterDevice() {
   gatherFormValues();
   try {
     const resp = await invoke("register_device", {
-      deviceType: config.device_type || "native",
+      deviceType: (config.device_type || "native").toLowerCase(),
       deviceId: config.device_id || null,
       minerPubkey: config.miner_pubkey || null,
     });
@@ -425,7 +425,7 @@ async function autoBootstrap() {
   // Step 1: Register device on validator
   try {
     await invoke("register_device", {
-      deviceType: config.device_type || "native",
+      deviceType: (config.device_type || "native").toLowerCase(),
       minerPubkey: config.miner_pubkey,
     });
   } catch (_) {
@@ -1023,7 +1023,7 @@ async function runMiningLoop() {
         }
         challenge = await invoke("rpc_post", {
           path: "/challenge",
-          body: { device_type: config.device_type || "native" },
+          body: { device_type: (config.device_type || "native").toLowerCase() },
         });
       }
 
@@ -1032,7 +1032,12 @@ async function runMiningLoop() {
         stats.last_challenge_id = challenge.id || "";
         await invoke("set_mining_stats", { stats });
 
-        const result = config.hexchain_mode
+        // Auto-detect mining mode from challenge fields.
+        // Hexchain challenges have coord + target; PoT-O challenges have operation_type + tensor.
+        const isHexChallenge = challenge.coord && challenge.target;
+        const useHexchain = isHexChallenge || (config.hexchain_mode && !challenge.operation_type);
+
+        const result = useHexchain
           ? await invoke("mine_hexchain", { challenge })
           : await invoke("mine_pot_o", { challenge });
 
@@ -1054,7 +1059,7 @@ async function runMiningLoop() {
                     type: "submit_proof",
                     proof: result.proof,
                     device_id: config.device_id || null,
-                    device_type: config.device_type || "native",
+                    device_type: (config.device_type || "native").toLowerCase(),
                   },
                 });
                 const wsResult = await waitForWsResult(5000);

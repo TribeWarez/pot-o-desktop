@@ -494,8 +494,9 @@ fn compute_actual_path(
 
     for &width in layer_widths {
         let stride = (activations.len() / width).max(1);
-        let mut layer_out = Vec::with_capacity(width);
-        for j in 0..width {
+        let limit = width.min(activations.len());
+        let mut layer_out = Vec::with_capacity(limit);
+        for j in 0..limit {
             let start = j * stride;
             let end = (start + stride).min(activations.len());
             let s: f64 = activations[start..end].iter().sum();

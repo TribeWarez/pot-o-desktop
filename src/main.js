@@ -415,6 +415,33 @@ async function doRegisterDevice() {
   }
 }
 
+// ── P2P Bootstrapping ──────────────────────────────────
+let bootstrapped = false;
+
+async function autoBootstrap() {
+  if (bootstrapped || !config.miner_pubkey) return;
+  bootstrapped = true;
+
+  // Step 1: Register device on validator
+  try {
+    await invoke("register_device", {
+      deviceType: config.device_type || "native",
+      minerPubkey: config.miner_pubkey,
+    });
+  } catch (_) {
+    // non-fatal
+  }
+
+  // Step 2: Connect WebSocket for push challenges + P2P presence
+  if (!wsConnected) {
+    try {
+      await doWsConnect();
+    } catch (_) {
+      // non-fatal
+    }
+  }
+}
+
 // ── Wallet ──────────────────────────────────────────────
 
 const TOKEN_TYPES = ["tribechain", "pttc", "nmtc", "stomp", "aum", "ai3"];
@@ -820,9 +847,9 @@ function renderDashboard() {
     html += `<p class="err">${pool._error}</p>`;
   } else {
     html += `<div class="grid-2">
-      <div><strong>Type:</strong> ${pool.pool_type || pool.type || '—'}</div>
-      <div><strong>Miners:</strong> ${pool.total_miners || pool.miners || '—'}</div>
-      <div><strong>Stake:</strong> ${pool.total_stake || pool.stake || '—'}</div>
+      <div><strong>Type:</strong> ${pool.pool_type ?? pool.type ?? '—'}</div>
+      <div><strong>Miners:</strong> ${pool.total_miners ?? pool.miners ?? '—'}</div>
+      <div><strong>Stake:</strong> ${pool.total_stake ?? pool.stake ?? '—'}</div>
       <div><strong>Min Stake:</strong> ${pool.minimum_stake ?? '—'}</div>
     </div>`;
   }
@@ -843,7 +870,7 @@ function renderDashboard() {
 
   // ── P2P + Hex Lattice ───────────────────────────────
   const peers = d.peers;
-  const peerCount = Array.isArray(peers) ? peers.length : 0;
+  const netPeers = Array.isArray(peers) ? peers : (peers?.peers || []);
   const liveData = dashboardData.apiLive;
   const pot = liveData?.pot_o || liveData || {};
   const p2pMode = pot.peer_network_mode || '—';
@@ -851,25 +878,30 @@ function renderDashboard() {
   const synced = net.synced;
   const totalNodes = net.total_nodes ?? '—';
   const hexLatticeBlocks = (dashboardData.hexLattice && dashboardData.hexLattice.blocks) || [];
+  const validatorId = pot.node_id || '—';
+  const peerCount = netPeers.length + (wsConnected ? 1 : 0);
+  
   html += `<section>
     <h2 class="collapsible" data-toggle="p2p-section">Connected Peers <span class="peer-cnt">(${peerCount})</span></h2>
     <div id="p2p-section">
       <div class="p2p-mode-line">
         <strong>P2P mode:</strong> ${esc(p2pMode)}
-        <span class="dim">${peerCount > 0 ? '' : '(awaiting peers)'}</span>
         <span class="p2p-stats">· <strong>Network:</strong> ${totalNodes} node${totalNodes !== 1 ? 's' : ''} · ${synced ? 'Synced' : 'Not synced'}</span>
-      </div>`;
+      </div>
+      <div class="peer-list-section"><strong class="label">Peers:</strong><ul class="peer-list">`;
 
-  if (peerCount > 0) {
-    html += `<div class="peer-list-section"><strong class="label">Connected:</strong><ul class="peer-list">`;
-    for (const p of peers.slice(0, 20)) {
-      const s = typeof p === 'string' ? p : JSON.stringify(p);
-      html += `<li>${esc(s.slice(0, 80))}</li>`;
-    }
-    html += `</ul></div>`;
-  } else {
-    html += `<p class="dim" style="margin-top:6px">No peers connected</p>`;
+  // Always show the validator as the primary peer when WS is connected
+  if (wsConnected) {
+    html += `<li class="peer-validator">🟢 ${esc(validatorId)} <span class="dim">(validator · WS connected)</span></li>`;
   }
+  for (const p of netPeers.slice(0, 20)) {
+    const s = typeof p === 'string' ? p : JSON.stringify(p);
+    html += `<li>${esc(s.slice(0, 80))}</li>`;
+  }
+  if (peerCount === 0) {
+    html += `<li class="dim">No peers on network</li>`;
+  }
+  html += `</ul></div>`;
 
   // Hex chain lattice — show if hexchain mode or data exists
   if (config.hexchain_mode || hexLatticeBlocks.length > 0) {
@@ -1389,8 +1421,9 @@ function updateWsUi() {
 
 // ── Init ─────────────────────────────────────────────────
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   initToasts();
-  loadConfig();
+  await loadConfig();
+  autoBootstrap();
   setupWsListeners();
 });

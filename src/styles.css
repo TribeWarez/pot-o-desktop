@@ -181,6 +181,7 @@ h2.collapsible.collapsed::before { content: "▶"; }
 .honeycomb {
   display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;
 }
+.peer-validator { color: #00d4aa; font-weight: 600; }
 .hex-cell {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   width: 76px; height: 66px;

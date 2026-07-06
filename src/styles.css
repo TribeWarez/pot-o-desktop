@@ -133,7 +133,39 @@ th { color: #00d4aa; font-weight: 600; }
 .kp-detail { display: flex; gap: 12px; align-items: center; margin: 8px 0; }
 .kp-icon { font-size: 1.5rem; }
 
+/* ── Trace Tab ─────────────────────────────────────────── */
+.trace-status-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.trace-led {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  background: #555; flex-shrink: 0;
+}
+.trace-led.running { background: #00d4aa; box-shadow: 0 0 6px #00d4aa; }
+.trace-status-text { font-size: 0.95rem; font-weight: 600; }
+.trace-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; font-size: 0.82rem;
+}
+.trace-grid div { padding: 2px 0; }
+.trace-grid strong { color: #999; }
+.trace-path-line { margin-top: 8px; font-size: 0.82rem; word-break: break-all; }
+.path-sig { font-size: 0.75rem; color: #aaa; }
+.progress-bar {
+  height: 8px; background: #0f3460; border-radius: 4px; margin: 10px 0 4px; overflow: hidden;
+}
+.progress-fill {
+  height: 100%; background: linear-gradient(90deg, #00d4aa, #00aaff); border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.pct-label { font-size: 0.72rem; color: #666; text-align: right; }
+
+/* Compact trace card on Dashboard */
+.trace-compact { border-left: 3px solid #00d4aa; }
+.trace-compact .trace-grid { grid-template-columns: 1fr 1fr 1fr; }
+.trace-stat-run { grid-column: 1 / -1; margin-top: 4px; }
+
 /* Responsive */
+@media (max-width: 640px) {
+  .trace-grid, .trace-compact .trace-grid { grid-template-columns: 1fr; }
+}
 @media (max-width: 640px) {
   .row { flex-direction: column; gap: 0; }
   .grid-2 { grid-template-columns: 1fr; }

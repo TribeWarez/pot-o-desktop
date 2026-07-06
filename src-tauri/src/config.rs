@@ -8,9 +8,6 @@ pub struct PotOConfig {
     pub rpc_url: String,
     #[serde(default = "default_status_url")]
     pub status_url: String,
-    #[serde(default)]
-    pub solana_rpc_url: String,
-
     // Identity
     #[serde(default)]
     pub miner_pubkey: String,
@@ -94,7 +91,6 @@ impl Default for PotOConfig {
         Self {
             rpc_url: "https://pot.rpc.gateway.tribewarez.com".into(),
             status_url: "https://status.rpc.gateway.tribewarez.com".into(),
-            solana_rpc_url: String::new(),
             miner_pubkey: String::new(),
             miner_json_path: String::new(),
             submit_signature: String::new(),

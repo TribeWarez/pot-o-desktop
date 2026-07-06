@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "pot-o-desktop"
-version = "0.2.0"
+version = "0.4.2"
 dependencies = [
  "dirs",
  "ed25519-dalek",

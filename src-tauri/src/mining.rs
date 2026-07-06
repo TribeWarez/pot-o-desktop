@@ -4,10 +4,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Write;
+use std::sync::Mutex;
 
 use hexchain_p2p::block::HexBlock;
 use hexchain_p2p::lattice_geometry::HCPCoord;
 use hexchain_p2p::types::{BlockHash, TensorMeta, NEIGHBOR_SLOTS, NEIGHBOR_SLOT_EMPTY};
+
+use crate::MiningStats;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MiningResult {
@@ -24,7 +27,12 @@ impl MiningEngine {
         Self
     }
 
-    pub fn mine_pot_o(&self, challenge: Value, config: &super::config::PotOConfig) -> MiningResult {
+    pub fn mine_pot_o(
+        &self,
+        challenge: Value,
+        config: &super::config::PotOConfig,
+        stats: &Mutex<MiningStats>,
+    ) -> MiningResult {
         let c = challenge;
         let challenge_id = c["id"].as_str().unwrap_or("").to_string();
         let slot_hash = c["slot_hash"].as_str().unwrap_or("");
@@ -100,6 +108,24 @@ impl MiningEngine {
 
         let mml_score = compute_mml_score(&input_data, &output_data);
 
+        let max_iter = config.max_iterations as usize;
+        let tensor_dims_str = format!("{}x{}", rows, cols);
+
+        // ── Init trace stats ──
+        if let Ok(mut s) = stats.lock() {
+            s.mining_mode = "pot_o".into();
+            s.last_challenge_id = challenge_id.clone();
+            s.current_nonce = 0;
+            s.total_nonces = max_iter as u64;
+            s.best_distance = u32::MAX;
+            s.current_mml_score = mml_score;
+            s.current_path_sig.clear();
+            s.current_operation = op_name.to_string();
+            s.current_tensor_dims = tensor_dims_str.clone();
+            s.hexchain_coord.clear();
+            s.hexchain_target.clear();
+        }
+
         let mut result = MiningResult {
             status: "no_proof".into(),
             proof: None,
@@ -109,13 +135,16 @@ impl MiningEngine {
 
         if mml_score > mml_threshold {
             result.reason = Some("mml_threshold_not_met".into());
+            if let Ok(mut s) = stats.lock() {
+                s.mining_mode.clear();
+                s.current_path_sig = "mml_threshold_not_met".into();
+            }
             return result;
         }
 
         let exp_path = expected_path_signature(&challenge_id, &layer_widths);
         let tensor_hash = compute_tensor_hash(&output_data, &[out_rows, out_cols]);
 
-        let max_iter = config.max_iterations as usize;
         let mut best_dist = u32::MAX;
 
         for nonce in 0..max_iter {
@@ -123,6 +152,15 @@ impl MiningEngine {
             let dist = hamming_distance(&exp_path, &actual);
             if dist < best_dist {
                 best_dist = dist;
+            }
+
+            // ── Update trace stats every 500 iterations ──
+            if nonce % 500 == 0 {
+                if let Ok(mut s) = stats.lock() {
+                    s.current_nonce = nonce as u64;
+                    s.best_distance = best_dist;
+                    s.current_path_sig = path_to_hex(&actual);
+                }
             }
 
             if dist <= path_distance_max {
@@ -152,10 +190,24 @@ impl MiningEngine {
                     "timestamp": now,
                 });
 
+                // ── Final stats update on proof found ──
+                if let Ok(mut s) = stats.lock() {
+                    s.current_nonce = nonce as u64;
+                    s.best_distance = best_dist;
+                    s.current_path_sig = path_sig.clone();
+                    s.mining_mode.clear();
+                }
+
                 result.status = "proof_found".into();
                 result.proof = Some(proof);
                 return result;
             }
+        }
+
+        // Max iterations — mark idle
+        if let Ok(mut s) = stats.lock() {
+            s.mining_mode.clear();
+            s.current_path_sig = "max_iterations_reached".into();
         }
 
         result.reason = Some("max_iterations_reached".into());
@@ -166,6 +218,7 @@ impl MiningEngine {
         &self,
         challenge: Value,
         config: &super::config::PotOConfig,
+        stats: &Mutex<MiningStats>,
     ) -> MiningResult {
         let c = challenge;
         let challenge_id = c["id"].as_str().unwrap_or("").to_string();
@@ -207,6 +260,22 @@ impl MiningEngine {
         }
 
         let max_iter = config.max_iterations as usize;
+        let coord_str = format!("q={},r={},s={}", coord.q, coord.r, coord.s);
+
+        // ── Init trace stats ──
+        if let Ok(mut s) = stats.lock() {
+            s.mining_mode = "hexchain".into();
+            s.last_challenge_id = challenge_id.clone();
+            s.current_nonce = 0;
+            s.total_nonces = max_iter as u64;
+            s.best_distance = 0;
+            s.current_mml_score = 0.0;
+            s.current_path_sig.clear();
+            s.current_operation.clear();
+            s.current_tensor_dims.clear();
+            s.hexchain_coord = coord_str.clone();
+            s.hexchain_target = target_hex.to_string();
+        }
 
         for nonce in 0..max_iter {
             let block = HexBlock {
@@ -223,6 +292,13 @@ impl MiningEngine {
                     compression_den: 100,
                 },
             };
+
+            // ── Update trace stats every 500 iterations ──
+            if nonce % 500 == 0 {
+                if let Ok(mut s) = stats.lock() {
+                    s.current_nonce = nonce as u64;
+                }
+            }
 
             let hv = block.pow_hash();
             if hv <= target {
@@ -251,6 +327,11 @@ impl MiningEngine {
                     "timestamp_unix": now,
                 });
 
+                if let Ok(mut s) = stats.lock() {
+                    s.current_nonce = nonce as u64;
+                    s.mining_mode.clear();
+                }
+
                 return MiningResult {
                     status: "proof_found".into(),
                     proof: Some(proof),
@@ -258,6 +339,10 @@ impl MiningEngine {
                     reason: None,
                 };
             }
+        }
+
+        if let Ok(mut s) = stats.lock() {
+            s.mining_mode.clear();
         }
 
         MiningResult {
@@ -708,9 +793,10 @@ mod tests {
     fn test_mine_pot_o_no_proof() {
         let engine = MiningEngine::new();
         let config = make_test_config();
+        let stats = Mutex::new(MiningStats::default());
         // Empty challenge should return no_proof
         let challenge = serde_json::json!({});
-        let result = engine.mine_pot_o(challenge, &config);
+        let result = engine.mine_pot_o(challenge, &config, &stats);
         assert_eq!(result.status, "no_proof");
         assert!(result.proof.is_none());
     }
@@ -719,6 +805,7 @@ mod tests {
     fn test_mine_pot_o_with_simple_challenge() {
         let engine = MiningEngine::new();
         let config = make_test_config();
+        let stats = Mutex::new(MiningStats::default());
         let challenge = serde_json::json!({
             "id": format!("ab{}", "cd".repeat(16)), // long enough hex string
             "slot_hash": "ef",
@@ -728,7 +815,7 @@ mod tests {
             },
             "path_distance_max": 100, // Very lenient to find proof
         });
-        let result = engine.mine_pot_o(challenge, &config);
+        let result = engine.mine_pot_o(challenge, &config, &stats);
         // With lenient distance, should find proof
         assert_eq!(result.status, "proof_found", "Should find proof: {:?}", result.reason);
         assert!(result.proof.is_some());
@@ -744,6 +831,7 @@ mod tests {
     fn test_mine_hexchain_no_proof() {
         let engine = MiningEngine::new();
         let config = make_test_config();
+        let stats = Mutex::new(MiningStats::default());
         // Empty coord + impossible target
         let challenge = serde_json::json!({
             "id": "hex-test",
@@ -751,7 +839,7 @@ mod tests {
             "target": "0000000000000000000000000000000000000000000000000000000000000001",
             "created_at_unix": 1000000,
         });
-        let result = engine.mine_hexchain(challenge, &config);
+        let result = engine.mine_hexchain(challenge, &config, &stats);
         assert_eq!(result.status, "no_proof");
     }
 
@@ -759,6 +847,7 @@ mod tests {
     fn test_mine_hexchain_impossible_target_too_low() {
         let engine = MiningEngine::new();
         let config = make_test_config();
+        let stats = Mutex::new(MiningStats::default());
         // unreachable target (too low)
         let challenge = serde_json::json!({
             "id": "hex-test",
@@ -766,7 +855,7 @@ mod tests {
             "target": "0000000000000000000000000000000000000000000000000000000000000001",
             "created_at_unix": 1000000,
         });
-        let result = engine.mine_hexchain(challenge, &config);
+        let result = engine.mine_hexchain(challenge, &config, &stats);
         assert_eq!(result.status, "no_proof");
         assert_eq!(result.reason, Some("max_iterations_reached".into()));
     }
@@ -795,6 +884,7 @@ mod tests {
     fn test_mine_pot_o_mml_threshold_blocks() {
         let engine = MiningEngine::new();
         let mut config = make_test_config();
+        let stats = Mutex::new(MiningStats::default());
         config.mml_threshold = "0.0".into(); // blocks everything
         let challenge = serde_json::json!({
             "id": "ab".repeat(16),
@@ -804,7 +894,7 @@ mod tests {
             },
             "path_distance_max": 100,
         });
-        let result = engine.mine_pot_o(challenge, &config);
+        let result = engine.mine_pot_o(challenge, &config, &stats);
         assert_eq!(result.status, "no_proof");
         assert_eq!(result.reason, Some("mml_threshold_not_met".into()));
     }
@@ -813,6 +903,7 @@ mod tests {
     fn test_mine_pot_o_with_f64_tensor_data() {
         let engine = MiningEngine::new();
         let config = make_test_config();
+        let stats = Mutex::new(MiningStats::default());
         let challenge = serde_json::json!({
             "id": "ab".repeat(16),
             "input_tensor": {
@@ -821,7 +912,7 @@ mod tests {
             },
             "path_distance_max": 100,
         });
-        let result = engine.mine_pot_o(challenge, &config);
+        let result = engine.mine_pot_o(challenge, &config, &stats);
         assert_eq!(result.status, "proof_found", "Should handle F64 data: {:?}", result.reason);
     }
 
@@ -829,6 +920,7 @@ mod tests {
     fn test_mine_pot_o_with_i64_tensor_data() {
         let engine = MiningEngine::new();
         let config = make_test_config();
+        let stats = Mutex::new(MiningStats::default());
         let challenge = serde_json::json!({
             "id": "ab".repeat(16),
             "input_tensor": {
@@ -837,7 +929,7 @@ mod tests {
             },
             "path_distance_max": 100,
         });
-        let result = engine.mine_pot_o(challenge, &config);
+        let result = engine.mine_pot_o(challenge, &config, &stats);
         assert_eq!(result.status, "proof_found", "Should handle I64 data: {:?}", result.reason);
     }
 }

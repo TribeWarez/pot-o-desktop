@@ -13,6 +13,7 @@ let wsChallengeHandler = null;
 let wsConnected = false;
 let walletData = {};
 let walletTimer = null;
+let traceTimer = null;
 let walletLoggedIn = false;
 let walletAccounts = [];
 
@@ -62,10 +63,11 @@ function switchTab(tab) {
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   const panel = document.getElementById("tab_" + tab);
   if (panel) panel.classList.add("active");
-  if (tab === "dashboard") { startDashboard(); stopWallet(); }
-  else if (tab === "wallet") { startWallet(); stopDashboard(); }
-  else if (tab === "logs") { renderLogsTab(); stopDashboard(); stopWallet(); }
-  else { stopDashboard(); stopWallet(); }
+  if (tab === "dashboard") { startDashboard(); stopWallet(); stopTracePolling(); }
+  else if (tab === "wallet") { startWallet(); stopDashboard(); stopTracePolling(); }
+  else if (tab === "logs") { renderLogsTab(); stopDashboard(); stopWallet(); stopTracePolling(); }
+  else if (tab === "trace") { startTracePolling(); stopDashboard(); stopWallet(); }
+  else { stopDashboard(); stopWallet(); stopTracePolling(); }
 }
 
 document.addEventListener("click", async (e) => {
@@ -175,7 +177,6 @@ function gatherFormValues() {
   config.status_url = document.getElementById("status_url").value;
   config.ws_url = document.getElementById("ws_url").value;
   config.wallet_base_url = document.getElementById("wallet_base_url").value;
-  config.solana_rpc_url = document.getElementById("solana_rpc_url").value;
   config.miner_pubkey = document.getElementById("miner_pubkey").value;
   config.max_iterations = parseInt(document.getElementById("max_iterations").value) || 10000;
   config.max_tensor_dim = parseInt(document.getElementById("max_tensor_dim").value) || 256;
@@ -218,6 +219,7 @@ function renderSettings() {
         <nav>
           <button data-tab="settings">Settings</button>
           <button class="active" data-tab="dashboard">Dashboard</button>
+          <button data-tab="trace">Trace</button>
           <button data-tab="wallet">Wallet</button>
           <button data-tab="keypair">Keys</button>
           <button data-tab="logs">Logs</button>
@@ -254,12 +256,11 @@ function renderSettings() {
           <label>Status URL <input id="status_url" value="${esc(config.status_url)}" /></label>
           <label>WebSocket URL <input id="ws_url" value="${esc(config.ws_url || '')}" placeholder="Auto from RPC URL if empty" /></label>
           <label>Wallet Gateway URL <input id="wallet_base_url" value="${esc(config.wallet_base_url)}" placeholder="https://wallet.rpc.gateway.tribewarez.com" /></label>
-          <label>Solana RPC URL <input id="solana_rpc_url" value="${esc(config.solana_rpc_url)}" placeholder="Optional" /></label>
           <button type="button" data-action="test-connection">Test Connection</button>
         </section>
         <section>
           <h2>Identity</h2>
-          <label>Miner Pubkey <input id="miner_pubkey" value="${esc(config.miner_pubkey)}" placeholder="Solana pubkey or identity string" /></label>
+          <label>Miner Pubkey <input id="miner_pubkey" value="${esc(config.miner_pubkey)}" placeholder="Miner identity pubkey" /></label>
         </section>
         <section>
           <h2>Mining Parameters</h2>
@@ -349,6 +350,8 @@ function renderSettings() {
       </div>
 
       <div id="tab_dashboard" class="tab active"></div>
+
+      <div id="tab_trace" class="tab"></div>
 
       <div id="tab_wallet" class="tab"></div>
 
@@ -714,6 +717,30 @@ function renderDashboard() {
     <div class="stat"><span class="num">${stats.proofs_accepted || 0}</span> Accepted</div>
     <div class="stat"><span class="num">${stats.start_time ? fmtDuration(Math.floor(Date.now()/1000) - stats.start_time) : '—'}</span> Uptime</div>
   </div>`;
+
+  // ── Compact trace summary on dashboard ──
+  const mode = stats.mining_mode || "";
+  const activeTrace = mode !== "" && mode !== null && running;
+  if (activeTrace) {
+    const pct = stats.total_nonces > 0 ? Math.min(100, Math.round((stats.current_nonce / stats.total_nonces) * 100)) : 0;
+    const bestDist = stats.best_distance === 4294967295 ? "—" : stats.best_distance;
+    const cid = (stats.last_challenge_id || "").slice(0, 16) + "…";
+    html += `<section class="trace-compact">
+      <h2>Live Trace — ${mode.toUpperCase()}</h2>
+      <div class="trace-grid">
+        <div><strong>Challenge:</strong> <span class="mono">${esc(cid)}</span></div>
+        <div><strong>Nonce:</strong> ${stats.current_nonce || 0} / ${stats.total_nonces || 0} (${pct}%)</div>
+        <div><strong>Best Dist:</strong> ${bestDist}</div>`;
+    if (mode === "pot_o") {
+      html += `<div><strong>MML:</strong> ${stats.current_mml_score != null ? stats.current_mml_score.toFixed(4) : "—"}</div>`;
+    }
+    if (mode === "hexchain") {
+      html += `<div><strong>Coord:</strong> ${esc(stats.hexchain_coord || "—")}</div>`;
+    }
+    html += `</div>
+      <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+    </section>`;
+  }
 
   html += `<section><h2>Gateway Services</h2>`;
   const gs = d.gateway || {};
@@ -1084,13 +1111,6 @@ function renderKeypairInfo(info) {
     </div>
   `;
   document.getElementById("kp_pubkey_display").value = info.pubkey;
-  if (isKp) {
-    invoke("is_keypair_file", { path: info.path }).then(isKpFile => {
-      if (isKpFile) {
-        el.innerHTML += `<p class="warn">⚠ 64-byte Solana keypair — never use as proof signature</p>`;
-      }
-    });
-  }
 }
 
 async function setPubkeyFromKeypair() {
@@ -1150,6 +1170,109 @@ function renderLogsTab() {
     </section>
   </div>`;
   refreshLogs();
+}
+
+// ── Trace Tab ────────────────────────────────────────────
+
+function startTracePolling() {
+  renderTraceTab();
+  refreshTrace();
+  if (!traceTimer) traceTimer = setInterval(refreshTrace, 500);
+}
+
+function stopTracePolling() {
+  if (traceTimer) { clearInterval(traceTimer); traceTimer = null; }
+}
+
+async function refreshTrace() {
+  if (!document.getElementById("tab_trace")) return;
+  try {
+    const stats = await invoke("get_mining_stats");
+    renderTraceTab(stats);
+  } catch (_) {}
+}
+
+function renderTraceTab(stats) {
+  const el = document.getElementById("tab_trace");
+  if (!el) return;
+  const s = stats || {};
+  const running = s.running || false;
+  const mode = s.mining_mode || "";
+  const active = mode !== "" && mode !== null;
+  const isPot = mode === "pot_o";
+  const isHex = mode === "hexchain";
+  const pct = s.total_nonces > 0 ? Math.min(100, Math.round((s.current_nonce / s.total_nonces) * 100)) : 0;
+  const elapsed = s.start_time ? fmtDuration(Math.floor(Date.now() / 1000) - s.start_time) : "—";
+  const challengeLabel = s.last_challenge_id || "—";
+  const shortChallenge = challengeLabel.length > 32 ? challengeLabel.slice(0, 16) + "…" + challengeLabel.slice(-8) : challengeLabel;
+  const bestDist = s.best_distance === 4294967295 ? "—" : s.best_distance;
+
+  let html = `<div class="container">`;
+  html += `<header><h1>Trace</h1></header>`;
+
+  // ── Status ──
+  html += `<section><h2>Status</h2>`;
+  html += `<div class="trace-status-bar"><span class="trace-led ${active ? 'running' : ''}"></span>`;
+  html += `<span class="trace-status-text">${active ? '● Mining Active — ' + mode.toUpperCase() : '○ Idle'}</span></div>`;
+  html += `<div class="trace-grid">
+    <div><strong>Uptime:</strong> ${elapsed}</div>
+    <div><strong>Challenges:</strong> ${s.challenges || 0}</div>
+    <div><strong>Found:</strong> ${s.proofs_found || 0}</div>
+    <div><strong>Submitted:</strong> ${s.proofs_submitted || 0}</div>
+    <div><strong>Accepted:</strong> ${s.proofs_accepted || 0}</div>`;
+  if (running) {
+    html += `<div class="trace-stat-run" style="color:#00d4aa;font-weight:600">● Mining Loop Running</div>`;
+  }
+  html += `</div></section>`;
+
+  if (!active) {
+    if (running) {
+      html += `<section><p class="dim">○ Awaiting next challenge...</p></section>`;
+    } else {
+      html += `<section><p class="dim">No mining in progress. Start mining from the Dashboard tab to see live trace data.</p></section>`;
+    }
+    html += `</div>`;
+    el.innerHTML = html;
+    return;
+  }
+
+  // ── Challenge Info ──
+  html += `<section><h2>Challenge</h2>`;
+  html += `<div class="trace-grid">
+    <div><strong>ID:</strong> <span class="mono">${esc(shortChallenge)}</span></div>`;
+  if (isPot) {
+    html += `<div><strong>Operation:</strong> ${esc(s.current_operation || "—")}</div>
+      <div><strong>Tensor:</strong> ${esc(s.current_tensor_dims || "—")}</div>`;
+  }
+  if (isHex) {
+    html += `<div><strong>Coord:</strong> ${esc(s.hexchain_coord || "—")}</div>
+      <div><strong>Target:</strong> <span class="mono path-sig">${esc((s.hexchain_target || "—").slice(0, 32))}…</span></div>`;
+  }
+  html += `</div></section>`;
+
+  // ── Progress ──
+  html += `<section><h2>Progress</h2>`;
+  html += `<div class="trace-grid">
+    <div><strong>Nonce:</strong> ${s.current_nonce || 0} / ${s.total_nonces || 0}</div>
+    <div><strong>Best Distance:</strong> ${bestDist}</div>`;
+  if (isPot) {
+    html += `<div><strong>MML Score:</strong> ${s.current_mml_score != null ? s.current_mml_score.toFixed(4) : "—"}</div>`;
+  }
+  html += `</div>`;
+
+  // ── Progress bar ──
+  html += `<div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>`;
+  html += `<div class="pct-label">${pct}%</div>`;
+
+  // ── Path Signature ──
+  if (isPot && s.current_path_sig) {
+    html += `<div class="trace-path-line"><strong>Path Sig:</strong> <span class="mono path-sig">${esc(s.current_path_sig)}</span></div>`;
+  }
+
+  html += `</section>`;
+
+  html += `</div>`;
+  el.innerHTML = html;
 }
 
 // ── WebSocket Event Listeners ────────────────────────────

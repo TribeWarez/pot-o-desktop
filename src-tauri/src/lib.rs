@@ -33,6 +33,17 @@ pub struct MiningStats {
     pub proofs_accepted: u64,
     pub start_time: u64,
     pub last_challenge_id: String,
+    // ── Trace / progress fields (updated live during mining) ──
+    pub mining_mode: String,         // "pot_o", "hexchain", or ""
+    pub current_nonce: u64,
+    pub total_nonces: u64,
+    pub best_distance: u32,
+    pub current_mml_score: f64,
+    pub current_path_sig: String,
+    pub current_operation: String,
+    pub current_tensor_dims: String, // e.g. "64x64"
+    pub hexchain_coord: String,
+    pub hexchain_target: String,
 }
 
 struct AppState {
@@ -105,7 +116,7 @@ fn mine_pot_o(state: State<AppState>, challenge: Value) -> mining::MiningResult 
         },
     };
     let engine = state.engine.lock().unwrap_or_else(|e| e.into_inner());
-    engine.mine_pot_o(challenge, &config)
+    engine.mine_pot_o(challenge, &config, &state.stats)
 }
 
 #[tauri::command]
@@ -120,7 +131,7 @@ fn mine_hexchain(state: State<AppState>, challenge: Value) -> mining::MiningResu
         },
     };
     let engine = state.engine.lock().unwrap_or_else(|e| e.into_inner());
-    engine.mine_hexchain(challenge, &config)
+    engine.mine_hexchain(challenge, &config, &state.stats)
 }
 
 #[tauri::command]
@@ -164,7 +175,7 @@ fn read_keypair(path: String) -> Result<keypair::KeypairInfo, String> {
 
 #[tauri::command]
 fn is_keypair_file(path: String) -> bool {
-    keypair::is_solana_keypair(&path)
+    keypair::is_full_keypair(&path)
 }
 
 #[tauri::command]

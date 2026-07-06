@@ -35,7 +35,7 @@ pub fn generate_keypair(path: &str) -> Result<KeypairInfo, String> {
 /// Extract pubkey from a keypair file.
 ///
 /// Recognises three formats:
-/// - 64 bytes: Solana full keypair (secret || pubkey)
+/// - 64 bytes: full keypair (secret || pubkey)
 /// - 32 bytes: either a raw public key, or a secret key (from which we derive the pubkey)
 /// - anything else: hex-encoded verbatim
 pub fn pubkey_from_file(path: &str) -> Result<KeypairInfo, String> {
@@ -44,7 +44,7 @@ pub fn pubkey_from_file(path: &str) -> Result<KeypairInfo, String> {
         serde_json::from_str(&content).map_err(|_| "Not a valid JSON array".to_string())?;
 
     if bytes.len() == 64 {
-        // Solana keypair format — bytes [0..32] are secret, bytes [32..64] are pubkey
+        // Full keypair format — bytes [0..32] are secret, bytes [32..64] are pubkey
         let kp_bytes: [u8; 64] = bytes[..64]
             .try_into()
             .map_err(|_| "Invalid keypair length".to_string())?;
@@ -93,8 +93,8 @@ pub fn pubkey_from_file(path: &str) -> Result<KeypairInfo, String> {
     }
 }
 
-/// Detect if a file is a 64-byte Solana keypair
-pub fn is_solana_keypair(path: &str) -> bool {
+/// Detect if a file is a 64-byte full keypair (secret || pubkey)
+pub fn is_full_keypair(path: &str) -> bool {
     if !Path::new(path).exists() {
         return false;
     }
@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_solana_keypair_true() {
+    fn test_is_full_keypair_true() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("solana-kp.json");
         let path_str = path.to_str().unwrap();
@@ -156,11 +156,11 @@ mod tests {
         let json = serde_json::to_string(&bytes).unwrap();
         fs::write(path_str, &json).unwrap();
 
-        assert!(is_solana_keypair(path_str));
+        assert!(is_full_keypair(path_str));
     }
 
     #[test]
-    fn test_is_solana_keypair_false() {
+    fn test_is_full_keypair_false() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("not-keypair.json");
         let path_str = path.to_str().unwrap();
@@ -170,21 +170,21 @@ mod tests {
         let json = serde_json::to_string(&bytes).unwrap();
         fs::write(path_str, &json).unwrap();
 
-        assert!(!is_solana_keypair(path_str));
+        assert!(!is_full_keypair(path_str));
     }
 
     #[test]
-    fn test_is_solana_keypair_missing_file() {
-        assert!(!is_solana_keypair("/nonexistent/path.json"));
+    fn test_is_full_keypair_missing_file() {
+        assert!(!is_full_keypair("/nonexistent/path.json"));
     }
 
     #[test]
-    fn test_is_solana_keypair_invalid_json() {
+    fn test_is_full_keypair_invalid_json() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("invalid.json");
         let path_str = path.to_str().unwrap();
         fs::write(path_str, "not json").unwrap();
-        assert!(!is_solana_keypair(path_str));
+        assert!(!is_full_keypair(path_str));
     }
 
     #[test]
@@ -227,7 +227,7 @@ mod tests {
         let gen = generate_keypair(path_str).unwrap();
 
         // Generated file is 32 bytes (secret key only), not 64
-        assert!(!is_solana_keypair(path_str));
+        assert!(!is_full_keypair(path_str));
 
         // But it must load back successfully via the secret-key fallback
         let loaded = pubkey_from_file(path_str).unwrap();

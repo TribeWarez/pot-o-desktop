@@ -1051,7 +1051,7 @@ async function runMiningLoop() {
 
           try {
             // Try WS submission first, fall back to HTTP
-            let accepted = false;
+            let accepted;
             if (wsConnected) {
               try {
                 await invoke("ws_send", {
@@ -1062,7 +1062,7 @@ async function runMiningLoop() {
                     device_type: (config.device_type || "native").toLowerCase(),
                   },
                 });
-                const wsResult = await waitForWsResult(5000);
+                const wsResult = await waitForWsResult(2000);
                 accepted = wsResult.accepted;
                 if (accepted) {
                   showToast("Proof accepted via WS", "success");

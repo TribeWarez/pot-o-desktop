@@ -133,11 +133,11 @@ impl ChainSyncer {
         for height in start..=end {
             let block = match self.fetch_block(height).await {
                 Ok(b) => b,
-                Err("BLOCK_NOT_FOUND") => {
+                Err(ref e) if e == "BLOCK_NOT_FOUND" => {
                     tracing::warn!(height, "Block not found — reached validator's pruned tip");
                     break;
                 }
-                Err(e) => {
+                Err(ref e) => {
                     tracing::warn!(height, error = %e, "Failed to fetch block, retrying next cycle");
                     break;
                 }

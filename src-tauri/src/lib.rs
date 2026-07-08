@@ -3,7 +3,10 @@ mod keypair;
 mod logger;
 mod mining;
 mod rpc;
+mod storage;
 mod wallet;
+mod local_chain;
+mod syncer;
 mod ws_client;
 
 use config::PotOConfig;
@@ -56,6 +59,7 @@ struct AppState {
     ws_cmd_tx: Arc<Mutex<Option<WsCmdSender>>>,
     wallet: Mutex<Option<wallet::WalletClient>>,
     wallet_logged_in: AtomicBool,
+    chain_state: Arc<syncer::ChainState>,
 }
 
 #[tauri::command]
@@ -131,7 +135,7 @@ fn mine_hexchain(state: State<AppState>, challenge: Value) -> mining::MiningResu
         },
     };
     let engine = state.engine.lock().unwrap_or_else(|e| e.into_inner());
-    engine.mine_hexchain(challenge, &config, &state.stats)
+    engine.mine_hexchain(challenge, &config, &state.stats, Some(state.chain_state.as_ref()))
 }
 
 #[tauri::command]
@@ -368,9 +372,50 @@ fn clear_log() -> Result<(), String> {
     logger::clear_log()
 }
 
+#[tauri::command]
+async fn get_canonical_tip(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let tip = state.chain_state.canonical_tip.read().await;
+    Ok(serde_json::json!({
+        "height": tip.height,
+        "block_hash": tip.block_hash_hex(),
+    }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let config = PotOConfig::load();
+
+    let chain_state = tauri::async_runtime::block_on(syncer::ChainState::load_or_init())
+        .expect("Failed to initialize chain state");
+
+    let chain_state = Arc::new(chain_state);
+
+    {
+        let syncer = Arc::new(syncer::ChainSyncer::new(
+            config.rpc_url.clone(),
+            chain_state.clone(),
+        ));
+        let _ = tauri::async_runtime::block_on(syncer.sync_once());
+        syncer.clone().spawn_background_sync();
+    }
+
+    {
+        let poller = Arc::new(syncer::MempoolPoller::new(
+            config.rpc_url.clone(),
+            chain_state.clone(),
+        ));
+        poller.clone().spawn_background_poll();
+    }
+
+    let chain_state_for_shutdown = chain_state.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("Shutdown signal received — persisting chain state");
+        let _ = chain_state_for_shutdown.persist_canonical_tip().await;
+        let _ = chain_state_for_shutdown.persist_lattice().await;
+        let _ = chain_state_for_shutdown.persist_blocks().await;
+        tracing::info!("Chain state persisted");
+    });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -388,6 +433,7 @@ pub fn run() {
             ws_cmd_tx: Arc::new(Mutex::new(None)),
             wallet: Mutex::new(None),
             wallet_logged_in: AtomicBool::new(false),
+            chain_state,
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -415,6 +461,7 @@ pub fn run() {
             wallet_logout,
             read_log,
             clear_log,
+            get_canonical_tip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

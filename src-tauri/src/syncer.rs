@@ -10,8 +10,8 @@ use tokio::time::{interval, Duration};
 const BLOCKS_FILE: &str = "hexchain_blocks.json";
 const LATTICE_FILE: &str = "hexchain_lattice.json";
 const CANONICAL_TIP_FILE: &str = "canonical_tip.json";
-const BLOCKS_PERSIST_INTERVAL_secs: u64 = 30;
-const LATTICE_PERSIST_INTERVAL_secs: u64 = 30;
+const BLOCKS_PERSIST_INTERVAL_SECS: u64 = 30;
+const LATTICE_PERSIST_INTERVAL_SECS: u64 = 30;
 const MEMPOOL_POLL_INTERVAL_SECS: u64 = 10;
 
 pub struct ChainState {
@@ -153,7 +153,7 @@ impl ChainSyncer {
 
             persisted_count += 1;
 
-            if persisted_count % 100 == 0 {
+            if persisted_count.is_multiple_of(100) {
                 drop(our_tip);
                 let app_dir = ensure_app_dir().ok();
                 if let Some(ref dir) = app_dir {
@@ -220,7 +220,7 @@ impl MempoolPoller {
         let txs: Vec<LocalTx> = pending
             .into_iter()
             .flatten()
-            .filter_map(|v| LocalTx::from_json(v))
+            .filter_map(LocalTx::from_json)
             .collect();
 
         let mut mempool = self.chain_state.mempool.write().await;

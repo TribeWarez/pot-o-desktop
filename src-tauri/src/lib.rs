@@ -395,7 +395,7 @@ pub fn run() {
             config.rpc_url.clone(),
             chain_state.clone(),
         ));
-        tauri::async_runtime::block_on(syncer.sync_once());
+        let _ = tauri::async_runtime::block_on(syncer.sync_once());
         syncer.clone().spawn_background_sync();
     }
 

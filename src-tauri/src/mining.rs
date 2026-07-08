@@ -270,8 +270,7 @@ impl MiningEngine {
         // ── Get parent block from lattice ──────────────────────────────────────────
         let parent_hash = if let Some(cs) = chain_state {
             let parent_coord = hexchain_p2p::lattice_geometry::get_neighbors(coord);
-            parent_coord
-                .get(0)
+            parent_coord.first()
                 .and_then(|c| cs.lattice.hash_at(*c))
                 .unwrap_or(neighbor_hashes[0])
         } else {

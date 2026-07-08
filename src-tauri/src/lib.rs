@@ -407,6 +407,16 @@ pub fn run() {
         poller.clone().spawn_background_poll();
     }
 
+    let chain_state_for_shutdown = chain_state.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("Shutdown signal received — persisting chain state");
+        let _ = chain_state_for_shutdown.persist_canonical_tip().await;
+        let _ = chain_state_for_shutdown.persist_lattice().await;
+        let _ = chain_state_for_shutdown.persist_blocks().await;
+        tracing::info!("Chain state persisted");
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {

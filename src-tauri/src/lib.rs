@@ -3,6 +3,7 @@ mod keypair;
 mod logger;
 mod mining;
 mod rpc;
+mod storage;
 mod wallet;
 mod ws_client;
 

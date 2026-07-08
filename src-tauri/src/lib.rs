@@ -135,7 +135,7 @@ fn mine_hexchain(state: State<AppState>, challenge: Value) -> mining::MiningResu
         },
     };
     let engine = state.engine.lock().unwrap_or_else(|e| e.into_inner());
-    engine.mine_hexchain(challenge, &config, &state.stats)
+    engine.mine_hexchain(challenge, &config, &state.stats, Some(state.chain_state.as_ref()))
 }
 
 #[tauri::command]

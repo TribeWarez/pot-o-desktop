@@ -1,5 +1,5 @@
-use flate2::Compression;
 use flate2::write::ZlibEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -48,7 +48,10 @@ impl MiningEngine {
         };
         let path_distance_max = c["path_distance_max"].as_i64().unwrap_or(8) as u32;
         let max_dim = config.max_tensor_dim;
-        let tensor_dim = c["max_tensor_dim"].as_i64().unwrap_or(64).min(max_dim as i64) as u64;
+        let tensor_dim = c["max_tensor_dim"]
+            .as_i64()
+            .unwrap_or(64)
+            .min(max_dim as i64) as u64;
 
         let layer_widths: Vec<usize> = if config.path_layers.is_empty() {
             vec![32, 16, 8]
@@ -91,7 +94,12 @@ impl MiningEngine {
         } else if let Some(arr) = c["input_tensor"]["data"]["F64"].as_array() {
             input_data = arr.iter().filter_map(|v| v.as_f64()).take(total).collect();
         } else if let Some(arr) = c["input_tensor"]["data"]["I64"].as_array() {
-            input_data = arr.iter().filter_map(|v| v.as_i64()).map(|v| v as f64).take(total).collect();
+            input_data = arr
+                .iter()
+                .filter_map(|v| v.as_i64())
+                .map(|v| v as f64)
+                .take(total)
+                .collect();
         }
 
         while input_data.len() < total {
@@ -216,6 +224,7 @@ impl MiningEngine {
         challenge: Value,
         config: &super::config::PotOConfig,
         stats: &Mutex<MiningStats>,
+        chain_state: Option<&super::syncer::ChainState>,
     ) -> MiningResult {
         let c = challenge;
         let challenge_id = c["id"].as_str().unwrap_or("").to_string();
@@ -246,7 +255,9 @@ impl MiningEngine {
             let bytes = if let Some(s) = val.as_str() {
                 hex::decode(s).unwrap_or_default()
             } else if let Some(arr) = val.as_array() {
-                arr.iter().filter_map(|v| v.as_i64().map(|x| x as u8)).collect()
+                arr.iter()
+                    .filter_map(|v| v.as_i64().map(|x| x as u8))
+                    .collect()
             } else {
                 vec![0u8; 32]
             };
@@ -255,6 +266,59 @@ impl MiningEngine {
             slot[..len].copy_from_slice(&bytes[..len]);
             neighbor_hashes[i] = slot;
         }
+
+        // ── Get parent block from lattice ──────────────────────────────────────────
+        let parent_hash = if let Some(cs) = chain_state {
+            let parent_coord = hexchain_p2p::lattice_geometry::get_neighbors(coord);
+            parent_coord
+                .get(0)
+                .and_then(|c| cs.lattice.hash_at(*c))
+                .unwrap_or(neighbor_hashes[0])
+        } else {
+            neighbor_hashes[0]
+        };
+
+        // ── Get TXs from local mempool and compute merkle root ─────────────────────
+        let (tx_merkle_root, txs_for_block) = if let Some(cs) = chain_state {
+            let mempool = cs.mempool.blocking_read();
+            let selected: Vec<_> = mempool.sorted_txs().into_iter().take(12).collect();
+
+            if selected.is_empty() {
+                ([0u8; 32], None)
+            } else {
+                let mut hashes: [[u8; 32]; 12] = [[[0u8; 32]; 12][0]; 12];
+                for (i, tx) in selected.iter().enumerate() {
+                    hashes[i] = tx.tx_hash;
+                }
+                let merkle_root = hexchain_p2p::block::merkle_root_neighbors(&hashes);
+
+                let tx_json: Vec<serde_json::Value> = selected
+                    .iter()
+                    .map(|tx| {
+                        serde_json::json!({
+                            "tx_hash": hex::encode(tx.tx_hash),
+                            "from": tx.from,
+                            "to": tx.to,
+                            "amount": tx.amount.to_string(),
+                            "fee": tx.fee.to_string(),
+                            "nonce": tx.nonce.to_string(),
+                            "timestamp": tx.timestamp,
+                        })
+                    })
+                    .collect();
+
+                (merkle_root, Some(tx_json))
+            }
+        } else {
+            ([0u8; 32], None)
+        };
+
+        // ── Compute canonical tip height for next block ─────────────────────────
+        let canonical_tip_height = chain_state
+            .and_then(|cs| cs.canonical_tip.try_read().ok())
+            .map(|tip| tip.height)
+            .unwrap_or(0);
+        let next_height = canonical_tip_height.saturating_add(1);
 
         let max_iter = config.max_iterations as usize;
         let coord_str = format!("q={},r={},s={}", coord.q, coord.r, coord.s);
@@ -276,8 +340,11 @@ impl MiningEngine {
 
         for nonce in 0..max_iter {
             let block = HexBlock {
-                parent_hash: neighbor_hashes[0],
-                tx_merkle_root: [0u8; 32],
+                parent_hash,
+                height: next_height,
+                tx_merkle_root,
+                transactions: txs_for_block.clone(),
+                miner_address: Some(config.miner_pubkey.clone()),
                 timestamp: created_at,
                 nonce: nonce as u64,
                 coord,
@@ -309,6 +376,7 @@ impl MiningEngine {
                     "block": {
                         "parent_hash": block.parent_hash.iter().map(|&b| b as i64).collect::<Vec<_>>(),
                         "tx_merkle_root": block.tx_merkle_root.iter().map(|&b| b as i64).collect::<Vec<_>>(),
+                        "height": block.height,
                         "timestamp": block.timestamp,
                         "nonce": block.nonce,
                         "coord": {"q": block.coord.q, "r": block.coord.r, "s": block.coord.s},
@@ -319,6 +387,7 @@ impl MiningEngine {
                             "compression_num": block.tensor.compression_num,
                             "compression_den": block.tensor.compression_den,
                         },
+                        "transactions": block.transactions.as_ref().map(|txs| txs.len()).unwrap_or(0),
                     },
                     "miner_pubkey": config.miner_pubkey,
                     "timestamp_unix": now,
@@ -480,11 +549,7 @@ fn expected_path_signature(challenge_id_hex: &str, layer_widths: &[usize]) -> Ve
     sig
 }
 
-fn compute_actual_path(
-    output_floats: &[f64],
-    nonce: u64,
-    layer_widths: &[usize],
-) -> Vec<u8> {
+fn compute_actual_path(output_floats: &[f64], nonce: u64, layer_widths: &[usize]) -> Vec<u8> {
     let mut activations: Vec<f64> = output_floats.to_vec();
     let mut path_bits = Vec::new();
     let mut bit_idx: u32 = 0;
@@ -815,7 +880,11 @@ mod tests {
         });
         let result = engine.mine_pot_o(challenge, &config, &stats);
         // With lenient distance, should find proof
-        assert_eq!(result.status, "proof_found", "Should find proof: {:?}", result.reason);
+        assert_eq!(
+            result.status, "proof_found",
+            "Should find proof: {:?}",
+            result.reason
+        );
         assert!(result.proof.is_some());
         if let Some(proof) = result.proof {
             assert!(proof["challenge_id"].as_str().unwrap_or("").len() > 0);
@@ -911,7 +980,11 @@ mod tests {
             "path_distance_max": 100,
         });
         let result = engine.mine_pot_o(challenge, &config, &stats);
-        assert_eq!(result.status, "proof_found", "Should handle F64 data: {:?}", result.reason);
+        assert_eq!(
+            result.status, "proof_found",
+            "Should handle F64 data: {:?}",
+            result.reason
+        );
     }
 
     #[test]
@@ -928,6 +1001,10 @@ mod tests {
             "path_distance_max": 100,
         });
         let result = engine.mine_pot_o(challenge, &config, &stats);
-        assert_eq!(result.status, "proof_found", "Should handle I64 data: {:?}", result.reason);
+        assert_eq!(
+            result.status, "proof_found",
+            "Should handle I64 data: {:?}",
+            result.reason
+        );
     }
 }

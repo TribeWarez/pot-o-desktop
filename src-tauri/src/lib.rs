@@ -6,6 +6,7 @@ mod rpc;
 mod storage;
 mod wallet;
 mod local_chain;
+mod syncer;
 mod ws_client;
 
 use config::PotOConfig;

@@ -5,6 +5,7 @@ mod mining;
 mod rpc;
 mod storage;
 mod wallet;
+mod local_chain;
 mod ws_client;
 
 use config::PotOConfig;
